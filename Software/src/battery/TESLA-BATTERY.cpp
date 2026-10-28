@@ -469,7 +469,10 @@ void TeslaBattery::
       (static_cast<double>(datalayer_battery->status.real_soc) / 10000) * datalayer_battery->info.total_capacity_Wh);
 
   // Define the allowed discharge power
-  datalayer_battery->status.max_discharge_power_W = (battery_max_discharge_current * (battery_volts / 10));
+  // datalayer_battery->status.max_discharge_power_W = (battery_max_discharge_current * (battery_volts / 10));
+  datalayer_battery->status.max_discharge_power_W = 10000;
+    // HARDCODED DISCHARGE FOR MY NON-PCS BATTERY
+
   // Cap the allowed discharge power if higher than the maximum discharge power allowed
   if (datalayer_battery->status.max_discharge_power_W > datalayer_battery->status.override_discharge_power_W) {
     datalayer_battery->status.max_discharge_power_W = datalayer_battery->status.override_discharge_power_W;
@@ -478,6 +481,7 @@ void TeslaBattery::
   //The allowed charge power behaves strangely. We instead estimate this value
   //The inverter setting will ramp down this value based on SOC%
   datalayer_battery->status.max_charge_power_W = datalayer_battery->status.override_charge_power_W;
+
 
   datalayer_battery->status.temperature_min_dC = battery_min_temp;
 
@@ -536,7 +540,7 @@ void TeslaBattery::
   // Pack-internal contactors: DC bus is live only when the BMS confirms CLOSED (4).
   // Guarded so the GPIO contactor state machine stays authoritative when enabled.
   if (!contactor_control_enabled) {
-    datalayer.system.status.dc_bus_live = (battery_contactor == 4);
+    datalayer.system.status.dc_bus_live = true;//(battery_contactor == 4); // HARDCODED FOR NON-PCS
   }
 
   if (user_selected_tesla_GTW_chassisType > 1) {  //{{0, "Model S"}, {1, "Model X"}, {2, "Model 3"}, {3, "Model Y"}};
