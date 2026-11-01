@@ -38,6 +38,9 @@ extern bool inverter_low_pass_filter;
 extern bool charge_taper_soc;
 extern uint16_t charge_taper_band_pptt;
 extern uint16_t charge_taper_floor_W;
+extern bool charge_taper_voltage;
+extern uint16_t charge_taper_v_start_mV;
+extern uint16_t charge_taper_v_end_mV;
 
 // BYD-Modbus (Fronius GenericStorage) ControlData block, registers 400-408.
 // Default watchdog period in seconds, used until the inverter tells us otherwise via register 402.

@@ -1,0 +1,642 @@
+diff --git a/Software/Software.cpp b/Software/Software.cpp
+index 92049b4c..cf8287f7 100644
+--- a/Software/Software.cpp
++++ b/Software/Software.cpp
+@@ -30,6 +30,7 @@
+ #include "src/devboard/utils/logging.h"
+ #include "src/devboard/utils/ota_confirm_gate.h"
+ #include "src/devboard/utils/ota_rollback.h"
++#include "src/devboard/utils/soc_observer.h"
+ #include "src/devboard/utils/time_meas.h"
+ #include "src/devboard/utils/timer.h"
+ #include "src/devboard/utils/types.h"
+@@ -242,6 +243,79 @@ static void filter_charge_taper_soc(void) {
+   }
+ }
+ 
++/* What max_charge_power_W was when it came out of the safety layer, before either taper touched it.
++   Both tapers work from this same figure and the lower result wins, so enabling both never
++   multiplies the two reductions together. */
++static uint32_t pre_taper_charge_W = 0;
++
++/* Linear charge power taper on the highest cell voltage: full power up to charge_taper_v_start_mV,
++   falling to 0W at charge_taper_v_end_mV. Same profile as the SOC taper, including the float
++   charge power held through the band. At the end voltage charging stops and stays stopped until
++   the highest cell has fallen 50mV below it, so the charge session ends instead of restarting
++   every time the cells relax. Meant for chemistries with a flat curve (LFP) where the SOC the
++   BMS reports near the top cannot be trusted. */
++static void filter_charge_taper_voltage(void) {
++  static bool latched = false;
++  static bool engaged_logged = false;
++  if (!charge_taper_voltage || charge_taper_v_end_mV <= charge_taper_v_start_mV) {
++    latched = false;
++    return;
++  }
++  const uint16_t vmax = datalayer.battery.status.cell_max_voltage_mV;
++  if (vmax < 1000 || datalayer.battery.status.voltage_dV <= 10) {
++    return;  // No cell data decoded yet, nothing to taper on
++  }
++  const uint16_t start_mV = charge_taper_v_start_mV;
++  const uint16_t end_mV = charge_taper_v_end_mV;
++  const uint16_t release_mV = (end_mV > 50) ? (end_mV - 50) : 0;
++
++  if (latched && vmax < release_mV) {
++    latched = false;
++  }
++  if (vmax >= end_mV) {
++    latched = true;
++  }
++  if (!latched && vmax <= start_mV) {
++    if (vmax + 10 < start_mV) {
++      engaged_logged = false;
++    }
++    return;  // Below the band, datalayer values pass through untouched
++  }
++
++  uint32_t base_W = pre_taper_charge_W;
++  uint16_t voltage_dV = datalayer.battery.status.voltage_dV;
++  if (voltage_dV > 10) {
++    uint32_t cap_W = current_cap_to_power_W(effective_charge_cap_dA(), voltage_dV);
++    if (base_W > cap_W) {
++      base_W = cap_W;
++    }
++  }
++
++  uint32_t charge_W = 0;
++  if (!latched) {
++    charge_W = (base_W * (uint32_t)(end_mV - vmax)) / (uint32_t)(end_mV - start_mV);
++    uint32_t floor_W = charge_taper_floor_W < base_W ? charge_taper_floor_W : base_W;
++    if (base_W > 0 && floor_W > 0 && charge_W < floor_W) {
++      charge_W = floor_W;
++    }
++  }
++
++  if (charge_W < datalayer.battery.status.max_charge_power_W) {
++    datalayer.battery.status.max_charge_power_W = charge_W;
++    if (voltage_dV > 10) {
++      uint32_t charge_dA_from_power = (charge_W * 100) / voltage_dV;
++      if (charge_dA_from_power < datalayer.battery.status.max_charge_current_dA) {
++        datalayer.battery.status.max_charge_current_dA = (uint16_t)charge_dA_from_power;
++      }
++    }
++  }
++
++  if (!engaged_logged) {
++    logging.printf("Charge power tapering based on cell voltage engaged at %u mV max cell\n", vmax);
++    engaged_logged = true;
++  }
++}
++
+ /* Low pass filter for the battery power limits sent to the inverter (only when increasing,
+    10% new / 90% old per 1s cycle, ~10s time constant). Decreases take effect immediately.
+    Runs AFTER update_machineryprotection() so its input includes safety-layer zeroing
+@@ -577,9 +651,12 @@ void core_loop(void*) {
+         battery3->update_values();
+         check_parallel_battery_safety(3);
+       }
++      soc_observer_update();  // Own SOC/current for pack 1 when enabled, before anything reads real_soc
+       update_calculated_values(currentMillis);
+       update_machineryprotection(currentMillis);  // Check safeties
++      pre_taper_charge_W = datalayer.battery.status.max_charge_power_W;  // Shared input of both tapers
+       filter_charge_taper_soc();                  // Taper charge limit near full SOC (runs after safeties, before LPF)
++      filter_charge_taper_voltage();              // Taper charge limit on max cell voltage (lower of the two wins)
+       filter_inverter_limits();                   // Smooth limits towards inverter (runs after safeties on purpose)
+       update_aggregate_limits();                  // Fold pack 2/3 into the inverter limits, after every filter
+ 
+diff --git a/Software/src/battery/TESLA-BATTERY.h b/Software/src/battery/TESLA-BATTERY.h
+index 15cc309c..96aeb916 100644
+--- a/Software/src/battery/TESLA-BATTERY.h
++++ b/Software/src/battery/TESLA-BATTERY.h
+@@ -16,7 +16,9 @@ extern uint16_t user_selected_tesla_GTW_packEnergy;
+ 
+ class TeslaBattery : public CanBattery {
+  public:
+-  bool mandatory_charge_taper() { return true; }
++  // LFP is not locked to the 50-85% SOC taper start range: the BMS SOC is unreliable on LFP, so the
++  // user picks the taper (SOC and/or max cell voltage) themselves. Set Battery chemistry to LFP in settings.
++  bool mandatory_charge_taper() { return user_selected_battery_chemistry != battery_chemistry_enum::LFP; }
+   // Use the default constructor to create the first or single battery.
+   TeslaBattery() : renderer(&datalayer_extended.tesla, &datalayer.battery) {
+     datalayer_battery = &datalayer.battery;
+diff --git a/Software/src/communication/nvm/comm_nvm.cpp b/Software/src/communication/nvm/comm_nvm.cpp
+index 50b8e50d..75f87af9 100644
+--- a/Software/src/communication/nvm/comm_nvm.cpp
++++ b/Software/src/communication/nvm/comm_nvm.cpp
+@@ -1,4 +1,5 @@
+ #include "comm_nvm.h"
++#include "../../devboard/utils/soc_observer.h"
+ #include <esp_phy_init.h>  // esp_phy_erase_cal_data_in_nvs()
+ #include "../../battery/BATTERIES.h"
+ #include "../../battery/Battery.h"
+@@ -215,6 +216,17 @@ void init_stored_settings() {
+   charge_taper_band_pptt = 10000 - (settings.getUInt("CHGTAPERSTART", 95) *
+                                     100);  // Stored as start SOC in whole percent, used as band in pptt
+   charge_taper_floor_W = settings.getUInt("CHGTAPERFLOOR", 400);
++  charge_taper_voltage = settings.getBool("CHGTAPERV", false);
++  charge_taper_v_start_mV = settings.getUInt("CHGTAPERVSTART", 3400);
++  charge_taper_v_end_mV = settings.getUInt("CHGTAPERVEND", 3450);
++  soc_observer_enabled = settings.getBool("SOCOBS", false);
++  soc_observer_capacity_Wh = settings.getUInt("SOCOBSCAP", 0);
++  soc_observer_full_mV = settings.getUInt("SOCOBSFULLMV", 3360);
++  soc_observer_empty_mV = settings.getUInt("SOCOBSEMPTYMV", 3150);
++  soc_observer_full_pptt = settings.getUInt("SOCOBSFULLPCT", 100) * 100;
++  soc_observer_empty_pptt = settings.getUInt("SOCOBSEMPTYPCT", 0) * 100;
++  soc_observer_anchor_max_W = settings.getUInt("SOCOBSMAXW", 500);
++  soc_observer_timeout_s = settings.getUInt("SOCOBSTMO", 60);
+   contactor_control_inverted_logic = settings.getBool("NCCONTACTOR", false);
+   precharge_time_ms = settings.getUInt("PRECHGMS", 100);
+   contactor_control_enabled_double_battery = settings.getBool("CNTCTRLDBL", false);
+diff --git a/Software/src/devboard/mqtt/mqtt.cpp b/Software/src/devboard/mqtt/mqtt.cpp
+index 10bd3051..6471827f 100644
+--- a/Software/src/devboard/mqtt/mqtt.cpp
++++ b/Software/src/devboard/mqtt/mqtt.cpp
+@@ -16,6 +16,7 @@
+ #include "../../devboard/safety/safety.h"
+ #include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
+ #include "../utils/events.h"
++#include "../utils/soc_observer.h"
+ #include "../utils/timer.h"
+ #include "../webserver/webserver.h"
+ #include "mqtt_client.h"
+@@ -376,10 +377,12 @@ enum ButtonCommand {
+   BTN_SET_LIMITS,
+   BTN_ESPNOW_RUN,
+   BTN_SET_SCALESOC,
++  BTN_SET_POWER,
++  BTN_SET_SOC,
+   BTN_COUNT
+ };
+-static const char* button_commands[BTN_COUNT] = {"BMSRESET", "PAUSE",      "RESUME",     "RESTART",
+-                                                 "STOP",     "SET_LIMITS", "ESPNOW_RUN", "SET_SCALESOC"};
++static const char* button_commands[BTN_COUNT] = {"BMSRESET", "PAUSE",      "RESUME",     "RESTART",     "STOP",
++                                                 "SET_LIMITS", "ESPNOW_RUN", "SET_SCALESOC", "SET_POWER", "SET_SOC"};
+ static String button_command_topics[BTN_COUNT];
+ 
+ static String generateCommonInfoAutoConfigTopic(const char* entity_id) {
+@@ -1337,6 +1340,33 @@ void mqtt_message_received(char* topic_raw, int topic_len, char* data, int data_
+     }
+   }
+ 
++  // SOC observer inputs. Payload is a plain number.
++  //  SET_POWER: battery power in W at the pack terminals, positive = charging, negative = discharging
++  //  SET_SOC:   force the observer's SOC, percent 0-100
++  if (strcmp(topic, button_command_topics[BTN_SET_POWER].c_str()) == 0 ||
++      strcmp(topic, button_command_topics[BTN_SET_SOC].c_str()) == 0) {
++    char buf[32];
++    float value = 0.0f;
++    bool parsed = false;
++    if (data_len > 0 && data_len < (int)sizeof(buf)) {
++      memcpy(buf, data, data_len);
++      buf[data_len] = '\0';
++      char* end = nullptr;
++      value = strtof(buf, &end);
++      while (end != nullptr && *end != '\0' && isspace((unsigned char)*end)) {
++        end++;
++      }
++      parsed = (end != buf) && (end != nullptr) && (*end == '\0');  // "unavailable", "unknown" etc. are rejected
++    }
++    if (parsed) {
++      if (strcmp(topic, button_command_topics[BTN_SET_POWER].c_str()) == 0) {
++        soc_observer_set_power(value);
++      } else {
++        soc_observer_set_soc_pct(value);
++      }
++    }
++  }
++
+   free(topic);
+ }
+ 
+diff --git a/Software/src/devboard/utils/soc_observer.cpp b/Software/src/devboard/utils/soc_observer.cpp
+new file mode 100644
+index 00000000..53598507
+--- /dev/null
++++ b/Software/src/devboard/utils/soc_observer.cpp
+@@ -0,0 +1,226 @@
++#include "soc_observer.h"
++
++#include <Arduino.h>
++#include <math.h>
++#include "../../communication/nvm/comm_nvm.h"
++#include "../../datalayer/datalayer.h"
++#include "logging.h"
++
++bool soc_observer_enabled = false;
++uint32_t soc_observer_capacity_Wh = 0;
++uint16_t soc_observer_full_mV = 3360;
++uint16_t soc_observer_empty_mV = 3150;
++uint16_t soc_observer_full_pptt = 10000;
++uint16_t soc_observer_empty_pptt = 0;
++uint16_t soc_observer_anchor_max_W = 500;
++uint16_t soc_observer_timeout_s = 60;
++
++/* An anchor has to hold this long before it counts, so a spike or a sag cannot reset the counter */
++static constexpr float ANCHOR_DEBOUNCE_S = 20.0f;
++/* Longest step integrated in one go. A stalled loop must not turn into a huge energy jump */
++static constexpr float MAX_STEP_S = 5.0f;
++/* Flash is only written when SOC moved this much (0.01% units) and at most this often */
++static constexpr float SAVE_STEP_PPTT = 100.0f;
++static constexpr uint32_t SAVE_MIN_INTERVAL_MS = 60000;
++
++// Written from the MQTT task, read from the main loop
++static volatile float rx_power_W = 0.0f;
++static volatile uint32_t rx_power_ms = 0;
++static volatile bool rx_power_valid = false;
++static volatile int32_t pending_soc_pptt = -1;
++
++void soc_observer_set_power(float power_W) {
++  if (isnan(power_W) || isinf(power_W)) {
++    return;
++  }
++  rx_power_W = power_W;
++  rx_power_ms = millis();
++  rx_power_valid = true;
++}
++
++void soc_observer_set_soc_pct(float soc_pct) {
++  if (isnan(soc_pct) || soc_pct < 0.0f || soc_pct > 100.0f) {
++    return;
++  }
++  pending_soc_pptt = (int32_t)lroundf(soc_pct * 100.0f);
++}
++
++static void save_soc(float soc_pptt) {
++  BatteryEmulatorSettingsStore settings;
++  settings.saveUInt("SOCOBSPPTT", (uint32_t)lroundf(soc_pptt));
++}
++
++void soc_observer_update() {
++  if (!soc_observer_enabled) {
++    return;
++  }
++
++  static bool initialised = false;
++  static float soc_pptt = 0.0f;
++  static float last_saved_pptt = 0.0f;
++  static uint32_t last_ms = 0;
++  static uint32_t last_save_ms = 0;
++  static bool at_full = false;   // counter sits exactly on the full anchor
++  static bool at_empty = false;  // counter sits exactly on the empty anchor
++  static float full_s = 0.0f;    // how long the full condition has held
++  static float empty_s = 0.0f;
++  static bool full_fired = false;   // an anchor fires once per time the condition becomes true
++  static bool empty_fired = false;
++  static bool was_fresh = false;
++  static bool have_empty_ref = false;  // an empty anchor was seen, with a gap-free count since
++  static float net_since_empty_Wh = 0.0f;
++
++  DATALAYER_BATTERY_STATUS_TYPE& st = datalayer.battery.status;
++  const uint32_t now = millis();
++
++  const uint32_t cap_Wh =
++      soc_observer_capacity_Wh > 0 ? soc_observer_capacity_Wh : datalayer.battery.info.total_capacity_Wh;
++  if (cap_Wh == 0) {
++    return;
++  }
++
++  /* Forced balancing makes the Tesla driver pin its own SOC, leave that alone */
++  if (datalayer.battery_settings.user_requests_balancing) {
++    return;
++  }
++
++  if (!initialised) {
++    BatteryEmulatorSettingsStore settings(true);
++    const uint32_t saved = settings.getUInt("SOCOBSPPTT", 0xFFFFFFFF);
++    if (saved <= 10000) {
++      soc_pptt = (float)saved;
++    } else if (st.real_soc > 0 && st.real_soc <= 10000) {
++      soc_pptt = (float)st.real_soc;  // first ever start: take the BMS figure, then correct it with SET_SOC
++    } else {
++      return;  // nothing to start from yet, leave the BMS value in place
++    }
++    last_saved_pptt = soc_pptt;
++    last_ms = now;
++    last_save_ms = now;
++    initialised = true;
++    logging.printf("SOC observer started at %.2f%%\n", soc_pptt / 100.0f);
++  }
++
++  float dt_s = (float)(now - last_ms) / 1000.0f;
++  last_ms = now;
++  if (dt_s > MAX_STEP_S) {
++    dt_s = MAX_STEP_S;
++  }
++
++  bool save_now = false;
++  const int32_t pending = pending_soc_pptt;
++  if (pending >= 0) {
++    pending_soc_pptt = -1;
++    soc_pptt = (float)pending;
++    at_full = false;
++    at_empty = false;
++    have_empty_ref = false;
++    save_now = true;
++    logging.printf("SOC observer set to %.2f%%\n", soc_pptt / 100.0f);
++  }
++
++  /* Power input: only counts while it keeps arriving */
++  const bool fresh = rx_power_valid && ((uint32_t)(now - rx_power_ms) <= (uint32_t)soc_observer_timeout_s * 1000u);
++  const float power_W = fresh ? rx_power_W : 0.0f;
++  if (fresh != was_fresh) {
++    logging.printf(fresh ? "SOC observer: power input is back\n"
++                         : "SOC observer: power input is missing, holding SOC (no integration, no full anchor)\n");
++    if (!fresh) {
++      have_empty_ref = false;  // an energy gap makes the capacity measurement useless
++    }
++    was_fresh = fresh;
++  }
++
++  if (fresh) {
++    const float dWh = power_W * dt_s / 3600.0f;
++    soc_pptt += dWh / (float)cap_Wh * 10000.0f;
++    net_since_empty_Wh += dWh;
++  }
++
++  /* Anchors */
++  const bool cells_valid =
++      st.voltage_dV > 500 && st.cell_min_voltage_mV > 1000 && st.cell_max_voltage_mV >= st.cell_min_voltage_mV;
++  if (cells_valid && fresh && st.cell_max_voltage_mV >= soc_observer_full_mV &&
++      fabsf(power_W) <= (float)soc_observer_anchor_max_W) {
++    full_s += dt_s;
++  } else {
++    full_s = 0.0f;
++  }
++  /* No power gate on empty: the BMS and BE stop discharge near empty, so the load may never be light */
++  if (cells_valid && st.cell_min_voltage_mV <= soc_observer_empty_mV) {
++    empty_s += dt_s;
++  } else {
++    empty_s = 0.0f;
++  }
++
++  if (full_s == 0.0f) {
++    full_fired = false;
++  }
++  if (empty_s == 0.0f) {
++    empty_fired = false;
++  }
++  if (!full_fired && full_s >= ANCHOR_DEBOUNCE_S && soc_pptt < (float)soc_observer_full_pptt) {
++    full_fired = true;
++    logging.printf("SOC observer: full anchor (max cell %u mV), SOC %.2f%% -> %.2f%%\n", st.cell_max_voltage_mV,
++                   soc_pptt / 100.0f, soc_observer_full_pptt / 100.0f);
++    if (have_empty_ref && net_since_empty_Wh > 0.0f && soc_observer_full_pptt > soc_observer_empty_pptt) {
++      const float span = (float)(soc_observer_full_pptt - soc_observer_empty_pptt) / 10000.0f;
++      logging.printf("SOC observer: %.0f Wh in since the empty anchor, implies %.0f Wh between the anchors\n",
++                     net_since_empty_Wh, net_since_empty_Wh / span);
++    }
++    soc_pptt = (float)soc_observer_full_pptt;
++    at_full = true;
++    save_now = true;
++  }
++  if (!empty_fired && empty_s >= ANCHOR_DEBOUNCE_S && soc_pptt > (float)soc_observer_empty_pptt) {
++    empty_fired = true;
++    logging.printf("SOC observer: empty anchor (min cell %u mV), SOC %.2f%% -> %.2f%%\n", st.cell_min_voltage_mV,
++                   soc_pptt / 100.0f, soc_observer_empty_pptt / 100.0f);
++    soc_pptt = (float)soc_observer_empty_pptt;
++    at_empty = true;
++    have_empty_ref = fresh;
++    net_since_empty_Wh = 0.0f;
++    save_now = true;
++  }
++
++  /* The counter alone never reaches the anchor values: it stops one step short and waits for the
++     cell voltage to confirm. Only the anchor itself puts it exactly on full or empty, which is
++     also what lets the safety layer's battery full / empty handling act on a confirmed state. */
++  const float hi = at_full ? (float)soc_observer_full_pptt : (float)soc_observer_full_pptt - 1.0f;
++  const float lo = at_empty ? (float)soc_observer_empty_pptt : (float)soc_observer_empty_pptt + 1.0f;
++  if (soc_pptt > hi) {
++    soc_pptt = hi;
++  }
++  if (soc_pptt < lo) {
++    soc_pptt = lo;
++  }
++  if (soc_pptt < (float)soc_observer_full_pptt) {
++    at_full = false;
++  }
++  if (soc_pptt > (float)soc_observer_empty_pptt) {
++    at_empty = false;
++  }
++
++  /* Hand the result to the rest of BE */
++  st.real_soc = (uint16_t)lroundf(soc_pptt);
++  st.remaining_capacity_Wh = (uint32_t)((double)cap_Wh * (double)soc_pptt / 10000.0);
++  if (fresh && st.voltage_dV > 10) {
++    int32_t dA = (int32_t)lroundf(power_W * 100.0f / (float)st.voltage_dV);
++    if (dA > INT16_MAX) {
++      dA = INT16_MAX;
++    } else if (dA < INT16_MIN) {
++      dA = INT16_MIN;
++    }
++    st.current_dA = (int16_t)dA;  // active_power_W is derived from this later in the cycle
++  }
++
++  if (!save_now && fabsf(soc_pptt - last_saved_pptt) >= SAVE_STEP_PPTT &&
++      (uint32_t)(now - last_save_ms) >= SAVE_MIN_INTERVAL_MS) {
++    save_now = true;
++  }
++  if (save_now) {
++    save_soc(soc_pptt);
++    last_saved_pptt = soc_pptt;
++    last_save_ms = now;
++  }
++}
+diff --git a/Software/src/devboard/utils/soc_observer.h b/Software/src/devboard/utils/soc_observer.h
+new file mode 100644
+index 00000000..296722c2
+--- /dev/null
++++ b/Software/src/devboard/utils/soc_observer.h
+@@ -0,0 +1,30 @@
++#ifndef SOC_OBSERVER_H
++#define SOC_OBSERVER_H
++
++#include <stdint.h>
++
++/* SOC observer: BE's own energy counter for packs whose BMS cannot see the pack current (for
++   example a Tesla pack running without its PCS). The current comes from outside over MQTT, so
++   Home Assistant can hand over the inverter's battery power. It replaces datalayer.battery
++   real_soc / remaining_capacity_Wh / current_dA while enabled.
++
++   Settings (loaded from NVM in comm_nvm.cpp) */
++extern bool soc_observer_enabled;
++extern uint32_t soc_observer_capacity_Wh;  // 0 = use the pack's own total_capacity_Wh
++extern uint16_t soc_observer_full_mV;      // max cell at/above this (and idle) re-anchors SOC to the full value
++extern uint16_t soc_observer_empty_mV;     // min cell at/below this re-anchors SOC to the empty value
++extern uint16_t soc_observer_full_pptt;    // SOC set at the full anchor, 0.01% units (10000 = 100%)
++extern uint16_t soc_observer_empty_pptt;   // SOC set at the empty anchor, 0.01% units
++extern uint16_t soc_observer_anchor_max_W;  // |power| must be at or below this for the full anchor to count
++extern uint16_t soc_observer_timeout_s;     // power input older than this is treated as missing
++
++/** Battery power from outside, in W at the pack terminals. Positive = charging. Called from MQTT. */
++void soc_observer_set_power(float power_W);
++
++/** Force the counter to this SOC, percent 0-100. Called from MQTT (SET_SOC). */
++void soc_observer_set_soc_pct(float soc_pct);
++
++/** Run once per second, after battery->update_values() and before update_calculated_values(). */
++void soc_observer_update();
++
++#endif
+diff --git a/Software/src/devboard/webserver/settings_html.cpp b/Software/src/devboard/webserver/settings_html.cpp
+index eeb3286d..69aa0c29 100644
+--- a/Software/src/devboard/webserver/settings_html.cpp
++++ b/Software/src/devboard/webserver/settings_html.cpp
+@@ -641,6 +641,40 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
+     return String(settings.getUInt("CHGTAPERFLOOR", 400));
+   }
+ 
++  if (var == "CHGTAPERV") {
++    return settings.getBool("CHGTAPERV") ? "checked" : "";
++  }
++  if (var == "CHGTAPERVSTART") {
++    return String(settings.getUInt("CHGTAPERVSTART", 3400));
++  }
++  if (var == "CHGTAPERVEND") {
++    return String(settings.getUInt("CHGTAPERVEND", 3450));
++  }
++  if (var == "SOCOBS") {
++    return settings.getBool("SOCOBS") ? "checked" : "";
++  }
++  if (var == "SOCOBSCAP") {
++    return String(settings.getUInt("SOCOBSCAP", 0));
++  }
++  if (var == "SOCOBSFULLMV") {
++    return String(settings.getUInt("SOCOBSFULLMV", 3360));
++  }
++  if (var == "SOCOBSEMPTYMV") {
++    return String(settings.getUInt("SOCOBSEMPTYMV", 3150));
++  }
++  if (var == "SOCOBSFULLPCT") {
++    return String(settings.getUInt("SOCOBSFULLPCT", 100));
++  }
++  if (var == "SOCOBSEMPTYPCT") {
++    return String(settings.getUInt("SOCOBSEMPTYPCT", 0));
++  }
++  if (var == "SOCOBSMAXW") {
++    return String(settings.getUInt("SOCOBSMAXW", 500));
++  }
++  if (var == "SOCOBSTMO") {
++    return String(settings.getUInt("SOCOBSTMO", 60));
++  }
++
+   if (var == "SLOWCANINV") {
+     return settings.getBool("SLOWCANINV") ? "checked" : "";
+   }
+@@ -1852,6 +1886,16 @@ String qnhck_zero_text(uint16_t zero_mV) {
+       display: contents;
+     }
+ 
++    form .if-chgtaperv { display: none; }
++    form[data-chgtaperv="true"] .if-chgtaperv {
++      display: contents;
++    }
++
++    form .if-socobs { display: none; }
++    form[data-socobs="true"] .if-socobs {
++      display: contents;
++    }
++
+     form .if-mqtt { display: none; }
+     form[data-mqttenabled="true"] .if-mqtt {
+       display: contents;
+@@ -2338,6 +2382,52 @@ String qnhck_zero_text(uint16_t zero_mV) {
+         min="0" max="2000" step="10" />
+         </div>
+ 
++        <label>Charge power tapering based on max cell voltage:</label>
++        <input type='checkbox' name='CHGTAPERV' value='on' %CHGTAPERV% />
++
++        <div class='if-chgtaperv'>
++        <label>Start tapering at max cell voltage, mV: </label>
++        <input type='number' name='CHGTAPERVSTART' value="%CHGTAPERVSTART%"
++        min="3000" max="3600" step="1" />
++
++        <label>Reach 0W at max cell voltage, mV: </label>
++        <input type='number' name='CHGTAPERVEND' value="%CHGTAPERVEND%"
++        min="3000" max="3650" step="1" />
++        </div>
++
++        <label>SOC observer (own energy counter, power over MQTT SET_POWER):</label>
++        <input type='checkbox' name='SOCOBS' value='on' %SOCOBS% />
++
++        <div class='if-socobs'>
++        <label>Observer usable capacity, Wh (0 = battery default): </label>
++        <input type='number' name='SOCOBSCAP' value="%SOCOBSCAP%"
++        min="0" max="500000" step="1" />
++
++        <label>Full anchor: max cell at or above, mV: </label>
++        <input type='number' name='SOCOBSFULLMV' value="%SOCOBSFULLMV%"
++        min="2500" max="4300" step="1" />
++
++        <label>Full anchor sets SOC to, percent: </label>
++        <input type='number' name='SOCOBSFULLPCT' value="%SOCOBSFULLPCT%"
++        min="50" max="100" step="1" />
++
++        <label>Full anchor only counts at or below, W: </label>
++        <input type='number' name='SOCOBSMAXW' value="%SOCOBSMAXW%"
++        min="0" max="20000" step="10" />
++
++        <label>Empty anchor: min cell at or below, mV: </label>
++        <input type='number' name='SOCOBSEMPTYMV' value="%SOCOBSEMPTYMV%"
++        min="2000" max="4000" step="1" />
++
++        <label>Empty anchor sets SOC to, percent: </label>
++        <input type='number' name='SOCOBSEMPTYPCT' value="%SOCOBSEMPTYPCT%"
++        min="0" max="50" step="1" />
++
++        <label>Ignore power input older than, s: </label>
++        <input type='number' name='SOCOBSTMO' value="%SOCOBSTMO%"
++        min="5" max="3600" step="1" />
++        </div>
++
+         <label>Allow longer CAN timeout: </label>
+         <input type='checkbox' name='SLOWCANINV' value='on' %SLOWCANINV% />
+ 
+diff --git a/Software/src/devboard/webserver/webserver.cpp b/Software/src/devboard/webserver/webserver.cpp
+index 348f802f..3ac698ac 100644
+--- a/Software/src/devboard/webserver/webserver.cpp
++++ b/Software/src/devboard/webserver/webserver.cpp
+@@ -533,7 +533,7 @@ void init_webserver() {
+       "PYLONOFFSET",  "PYLONORDER",    "DEYEBYD",    "NCCONTACTOR",  "TRIBTR",        "CNTCTRLTRI",     "ESPNOWENABLED",
+       "PRIMOGEN24",   "LOWPASSFILTER", "WEBAUTH",    "SLOWCANINV",   "CHGTAPERSOC",   "MEASURECPUTEMP", "SYSLOGEN",
+       "PERBMSDEFSOC", "PERBMSSKIPBAL", "INVOFFGRID", "CHGESTIMATED", "MQTTHEAP",      "HADISCFWU",      "INVACCREB",
+-      "LEAFAUTOOFS",
++      "LEAFAUTOOFS",  "CHGTAPERV",     "SOCOBS",
+ #ifndef SMALL_FLASH_DEVICE
+       "CTINVERT",
+ #endif  // SMALL_FLASH_DEVICE
+@@ -550,6 +550,8 @@ void init_webserver() {
+       "GPIOOPT4",      "PYLONBAUD",     "PYLONBRAND", "DALYPWRPCT", "DALYPWRDV",    "DALYDVSTART",   "DALYPWRDEG",
+       "DALYPWR0C",     "GPIOOPT5",      "GPIOOPT6",   "INVICNT",    "FOXESSTYPE",   "FOXESSSUBTYPE", "FOXESSMODULES",
+       "CHGTAPERSTART", "CHGTAPERFLOOR", "SYSLOGPORT", "SYSLOGFAC",  "PERBMSRESETH",
++      "CHGTAPERVSTART", "CHGTAPERVEND", "SOCOBSCAP",  "SOCOBSFULLMV", "SOCOBSEMPTYMV", "SOCOBSFULLPCT",
++      "SOCOBSEMPTYPCT", "SOCOBSMAXW",   "SOCOBSTMO",
+ #ifndef SMALL_FLASH_DEVICE
+       "CTVNOM",        "CTANOM",        "QNHIPN",     "QNHVO",
+ #endif  // SMALL_FLASH_DEVICE
+diff --git a/Software/src/inverter/INVERTERS.cpp b/Software/src/inverter/INVERTERS.cpp
+index ead76a57..a492c13d 100644
+--- a/Software/src/inverter/INVERTERS.cpp
++++ b/Software/src/inverter/INVERTERS.cpp
+@@ -57,6 +57,9 @@ bool inverter_low_pass_filter = false;  //Should the charge/discharge limits be
+ bool charge_taper_soc = false;  //Should the charge power limit be tapered based on scaled SOC near full?
+ uint16_t charge_taper_band_pptt =
+     500;  //Taper band in pptt. 500 = taper starts at 95.00% scaled SOC, reaching 0W at 100.00%
++bool charge_taper_voltage = false;  //Taper the charge power limit on max cell voltage instead of/as well as SOC
++uint16_t charge_taper_v_start_mV = 3400;  //Max cell voltage where the voltage taper starts (full power below this)
++uint16_t charge_taper_v_end_mV = 3450;    //Max cell voltage where the voltage taper reaches 0W
+ uint16_t charge_taper_floor_W =
+     0;  //Minimum charge power in W held during tapering until 100.00% scaled SOC. 0 = disabled, taper goes linearly to 0W
+ 
+diff --git a/Software/src/inverter/INVERTERS.h b/Software/src/inverter/INVERTERS.h
+index f8fa3f78..96c7ea8f 100644
+--- a/Software/src/inverter/INVERTERS.h
++++ b/Software/src/inverter/INVERTERS.h
+@@ -38,6 +38,9 @@ extern bool inverter_low_pass_filter;
+ extern bool charge_taper_soc;
+ extern uint16_t charge_taper_band_pptt;
+ extern uint16_t charge_taper_floor_W;
++extern bool charge_taper_voltage;
++extern uint16_t charge_taper_v_start_mV;
++extern uint16_t charge_taper_v_end_mV;
+ 
+ // BYD-Modbus (Fronius GenericStorage) ControlData block, registers 400-408.
+ // Default watchdog period in seconds, used until the inverter tells us otherwise via register 402.

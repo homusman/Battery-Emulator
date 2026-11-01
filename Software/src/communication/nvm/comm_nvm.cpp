@@ -1,4 +1,5 @@
 #include "comm_nvm.h"
+#include "../../devboard/utils/soc_observer.h"
 #include <esp_phy_init.h>  // esp_phy_erase_cal_data_in_nvs()
 #include "../../battery/BATTERIES.h"
 #include "../../battery/Battery.h"
@@ -215,6 +216,17 @@ void init_stored_settings() {
   charge_taper_band_pptt = 10000 - (settings.getUInt("CHGTAPERSTART", 95) *
                                     100);  // Stored as start SOC in whole percent, used as band in pptt
   charge_taper_floor_W = settings.getUInt("CHGTAPERFLOOR", 400);
+  charge_taper_voltage = settings.getBool("CHGTAPERV", false);
+  charge_taper_v_start_mV = settings.getUInt("CHGTAPERVSTART", 3400);
+  charge_taper_v_end_mV = settings.getUInt("CHGTAPERVEND", 3450);
+  soc_observer_enabled = settings.getBool("SOCOBS", false);
+  soc_observer_capacity_Wh = settings.getUInt("SOCOBSCAP", 0);
+  soc_observer_full_mV = settings.getUInt("SOCOBSFULLMV", 3360);
+  soc_observer_empty_mV = settings.getUInt("SOCOBSEMPTYMV", 3150);
+  soc_observer_full_pptt = settings.getUInt("SOCOBSFULLPCT", 100) * 100;
+  soc_observer_empty_pptt = settings.getUInt("SOCOBSEMPTYPCT", 0) * 100;
+  soc_observer_anchor_max_W = settings.getUInt("SOCOBSMAXW", 500);
+  soc_observer_timeout_s = settings.getUInt("SOCOBSTMO", 60);
   contactor_control_inverted_logic = settings.getBool("NCCONTACTOR", false);
   precharge_time_ms = settings.getUInt("PRECHGMS", 100);
   contactor_control_enabled_double_battery = settings.getBool("CNTCTRLDBL", false);

@@ -30,6 +30,7 @@
 #include "src/devboard/utils/logging.h"
 #include "src/devboard/utils/ota_confirm_gate.h"
 #include "src/devboard/utils/ota_rollback.h"
+#include "src/devboard/utils/soc_observer.h"
 #include "src/devboard/utils/time_meas.h"
 #include "src/devboard/utils/timer.h"
 #include "src/devboard/utils/types.h"
@@ -239,6 +240,79 @@ static void filter_charge_taper_soc(void) {
     }
   } else if (soc < (10000 - band - 50)) {  // 0.5% hysteresis before re-arming the log entry
     taper_engaged_logged = false;
+  }
+}
+
+/* What max_charge_power_W was when it came out of the safety layer, before either taper touched it.
+   Both tapers work from this same figure and the lower result wins, so enabling both never
+   multiplies the two reductions together. */
+static uint32_t pre_taper_charge_W = 0;
+
+/* Linear charge power taper on the highest cell voltage: full power up to charge_taper_v_start_mV,
+   falling to 0W at charge_taper_v_end_mV. Same profile as the SOC taper, including the float
+   charge power held through the band. At the end voltage charging stops and stays stopped until
+   the highest cell has fallen 50mV below it, so the charge session ends instead of restarting
+   every time the cells relax. Meant for chemistries with a flat curve (LFP) where the SOC the
+   BMS reports near the top cannot be trusted. */
+static void filter_charge_taper_voltage(void) {
+  static bool latched = false;
+  static bool engaged_logged = false;
+  if (!charge_taper_voltage || charge_taper_v_end_mV <= charge_taper_v_start_mV) {
+    latched = false;
+    return;
+  }
+  const uint16_t vmax = datalayer.battery.status.cell_max_voltage_mV;
+  if (vmax < 1000 || datalayer.battery.status.voltage_dV <= 10) {
+    return;  // No cell data decoded yet, nothing to taper on
+  }
+  const uint16_t start_mV = charge_taper_v_start_mV;
+  const uint16_t end_mV = charge_taper_v_end_mV;
+  const uint16_t release_mV = (end_mV > 50) ? (end_mV - 50) : 0;
+
+  if (latched && vmax < release_mV) {
+    latched = false;
+  }
+  if (vmax >= end_mV) {
+    latched = true;
+  }
+  if (!latched && vmax <= start_mV) {
+    if (vmax + 10 < start_mV) {
+      engaged_logged = false;
+    }
+    return;  // Below the band, datalayer values pass through untouched
+  }
+
+  uint32_t base_W = pre_taper_charge_W;
+  uint16_t voltage_dV = datalayer.battery.status.voltage_dV;
+  if (voltage_dV > 10) {
+    uint32_t cap_W = current_cap_to_power_W(effective_charge_cap_dA(), voltage_dV);
+    if (base_W > cap_W) {
+      base_W = cap_W;
+    }
+  }
+
+  uint32_t charge_W = 0;
+  if (!latched) {
+    charge_W = (base_W * (uint32_t)(end_mV - vmax)) / (uint32_t)(end_mV - start_mV);
+    uint32_t floor_W = charge_taper_floor_W < base_W ? charge_taper_floor_W : base_W;
+    if (base_W > 0 && floor_W > 0 && charge_W < floor_W) {
+      charge_W = floor_W;
+    }
+  }
+
+  if (charge_W < datalayer.battery.status.max_charge_power_W) {
+    datalayer.battery.status.max_charge_power_W = charge_W;
+    if (voltage_dV > 10) {
+      uint32_t charge_dA_from_power = (charge_W * 100) / voltage_dV;
+      if (charge_dA_from_power < datalayer.battery.status.max_charge_current_dA) {
+        datalayer.battery.status.max_charge_current_dA = (uint16_t)charge_dA_from_power;
+      }
+    }
+  }
+
+  if (!engaged_logged) {
+    logging.printf("Charge power tapering based on cell voltage engaged at %u mV max cell\n", vmax);
+    engaged_logged = true;
   }
 }
 
@@ -577,9 +651,12 @@ void core_loop(void*) {
         battery3->update_values();
         check_parallel_battery_safety(3);
       }
+      soc_observer_update();  // Own SOC/current for pack 1 when enabled, before anything reads real_soc
       update_calculated_values(currentMillis);
       update_machineryprotection(currentMillis);  // Check safeties
+      pre_taper_charge_W = datalayer.battery.status.max_charge_power_W;  // Shared input of both tapers
       filter_charge_taper_soc();                  // Taper charge limit near full SOC (runs after safeties, before LPF)
+      filter_charge_taper_voltage();              // Taper charge limit on max cell voltage (lower of the two wins)
       filter_inverter_limits();                   // Smooth limits towards inverter (runs after safeties on purpose)
       update_aggregate_limits();                  // Fold pack 2/3 into the inverter limits, after every filter
 

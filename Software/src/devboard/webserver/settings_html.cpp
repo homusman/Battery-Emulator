@@ -641,6 +641,40 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
     return String(settings.getUInt("CHGTAPERFLOOR", 400));
   }
 
+  if (var == "CHGTAPERV") {
+    return settings.getBool("CHGTAPERV") ? "checked" : "";
+  }
+  if (var == "CHGTAPERVSTART") {
+    return String(settings.getUInt("CHGTAPERVSTART", 3400));
+  }
+  if (var == "CHGTAPERVEND") {
+    return String(settings.getUInt("CHGTAPERVEND", 3450));
+  }
+  if (var == "SOCOBS") {
+    return settings.getBool("SOCOBS") ? "checked" : "";
+  }
+  if (var == "SOCOBSCAP") {
+    return String(settings.getUInt("SOCOBSCAP", 0));
+  }
+  if (var == "SOCOBSFULLMV") {
+    return String(settings.getUInt("SOCOBSFULLMV", 3360));
+  }
+  if (var == "SOCOBSEMPTYMV") {
+    return String(settings.getUInt("SOCOBSEMPTYMV", 3150));
+  }
+  if (var == "SOCOBSFULLPCT") {
+    return String(settings.getUInt("SOCOBSFULLPCT", 100));
+  }
+  if (var == "SOCOBSEMPTYPCT") {
+    return String(settings.getUInt("SOCOBSEMPTYPCT", 0));
+  }
+  if (var == "SOCOBSMAXW") {
+    return String(settings.getUInt("SOCOBSMAXW", 500));
+  }
+  if (var == "SOCOBSTMO") {
+    return String(settings.getUInt("SOCOBSTMO", 60));
+  }
+
   if (var == "SLOWCANINV") {
     return settings.getBool("SLOWCANINV") ? "checked" : "";
   }
@@ -1852,6 +1886,16 @@ String qnhck_zero_text(uint16_t zero_mV) {
       display: contents;
     }
 
+    form .if-chgtaperv { display: none; }
+    form[data-chgtaperv="true"] .if-chgtaperv {
+      display: contents;
+    }
+
+    form .if-socobs { display: none; }
+    form[data-socobs="true"] .if-socobs {
+      display: contents;
+    }
+
     form .if-mqtt { display: none; }
     form[data-mqttenabled="true"] .if-mqtt {
       display: contents;
@@ -2336,6 +2380,52 @@ String qnhck_zero_text(uint16_t zero_mV) {
         <label>Float charge power, W: </label>
         <input type='number' name='CHGTAPERFLOOR' value="%CHGTAPERFLOOR%"
         min="0" max="2000" step="10" />
+        </div>
+
+        <label>Charge power tapering based on max cell voltage:</label>
+        <input type='checkbox' name='CHGTAPERV' value='on' %CHGTAPERV% />
+
+        <div class='if-chgtaperv'>
+        <label>Start tapering at max cell voltage, mV: </label>
+        <input type='number' name='CHGTAPERVSTART' value="%CHGTAPERVSTART%"
+        min="3000" max="3600" step="1" />
+
+        <label>Reach 0W at max cell voltage, mV: </label>
+        <input type='number' name='CHGTAPERVEND' value="%CHGTAPERVEND%"
+        min="3000" max="3650" step="1" />
+        </div>
+
+        <label>SOC observer (own energy counter, power over MQTT SET_POWER):</label>
+        <input type='checkbox' name='SOCOBS' value='on' %SOCOBS% />
+
+        <div class='if-socobs'>
+        <label>Observer usable capacity, Wh (0 = battery default): </label>
+        <input type='number' name='SOCOBSCAP' value="%SOCOBSCAP%"
+        min="0" max="500000" step="1" />
+
+        <label>Full anchor: max cell at or above, mV: </label>
+        <input type='number' name='SOCOBSFULLMV' value="%SOCOBSFULLMV%"
+        min="2500" max="4300" step="1" />
+
+        <label>Full anchor sets SOC to, percent: </label>
+        <input type='number' name='SOCOBSFULLPCT' value="%SOCOBSFULLPCT%"
+        min="50" max="100" step="1" />
+
+        <label>Full anchor only counts at or below, W: </label>
+        <input type='number' name='SOCOBSMAXW' value="%SOCOBSMAXW%"
+        min="0" max="20000" step="10" />
+
+        <label>Empty anchor: min cell at or below, mV: </label>
+        <input type='number' name='SOCOBSEMPTYMV' value="%SOCOBSEMPTYMV%"
+        min="2000" max="4000" step="1" />
+
+        <label>Empty anchor sets SOC to, percent: </label>
+        <input type='number' name='SOCOBSEMPTYPCT' value="%SOCOBSEMPTYPCT%"
+        min="0" max="50" step="1" />
+
+        <label>Ignore power input older than, s: </label>
+        <input type='number' name='SOCOBSTMO' value="%SOCOBSTMO%"
+        min="5" max="3600" step="1" />
         </div>
 
         <label>Allow longer CAN timeout: </label>

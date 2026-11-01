@@ -16,6 +16,7 @@
 #include "../../devboard/safety/safety.h"
 #include "../../lib/bblanchon-ArduinoJson/ArduinoJson.h"
 #include "../utils/events.h"
+#include "../utils/soc_observer.h"
 #include "../utils/timer.h"
 #include "../webserver/webserver.h"
 #include "mqtt_client.h"
@@ -376,10 +377,12 @@ enum ButtonCommand {
   BTN_SET_LIMITS,
   BTN_ESPNOW_RUN,
   BTN_SET_SCALESOC,
+  BTN_SET_POWER,
+  BTN_SET_SOC,
   BTN_COUNT
 };
-static const char* button_commands[BTN_COUNT] = {"BMSRESET", "PAUSE",      "RESUME",     "RESTART",
-                                                 "STOP",     "SET_LIMITS", "ESPNOW_RUN", "SET_SCALESOC"};
+static const char* button_commands[BTN_COUNT] = {"BMSRESET", "PAUSE",      "RESUME",     "RESTART",     "STOP",
+                                                 "SET_LIMITS", "ESPNOW_RUN", "SET_SCALESOC", "SET_POWER", "SET_SOC"};
 static String button_command_topics[BTN_COUNT];
 
 static String generateCommonInfoAutoConfigTopic(const char* entity_id) {
@@ -1333,6 +1336,33 @@ void mqtt_message_received(char* topic_raw, int topic_len, char* data, int data_
             logging.printf("MQTT: SET_SCALESOC min_pct %.1f out of range (-10.0-50.0), ignored\n", min_pct);
           }
         }
+      }
+    }
+  }
+
+  // SOC observer inputs. Payload is a plain number.
+  //  SET_POWER: battery power in W at the pack terminals, positive = charging, negative = discharging
+  //  SET_SOC:   force the observer's SOC, percent 0-100
+  if (strcmp(topic, button_command_topics[BTN_SET_POWER].c_str()) == 0 ||
+      strcmp(topic, button_command_topics[BTN_SET_SOC].c_str()) == 0) {
+    char buf[32];
+    float value = 0.0f;
+    bool parsed = false;
+    if (data_len > 0 && data_len < (int)sizeof(buf)) {
+      memcpy(buf, data, data_len);
+      buf[data_len] = '\0';
+      char* end = nullptr;
+      value = strtof(buf, &end);
+      while (end != nullptr && *end != '\0' && isspace((unsigned char)*end)) {
+        end++;
+      }
+      parsed = (end != buf) && (end != nullptr) && (*end == '\0');  // "unavailable", "unknown" etc. are rejected
+    }
+    if (parsed) {
+      if (strcmp(topic, button_command_topics[BTN_SET_POWER].c_str()) == 0) {
+        soc_observer_set_power(value);
+      } else {
+        soc_observer_set_soc_pct(value);
       }
     }
   }

@@ -16,7 +16,9 @@ extern uint16_t user_selected_tesla_GTW_packEnergy;
 
 class TeslaBattery : public CanBattery {
  public:
-  bool mandatory_charge_taper() { return true; }
+  // LFP is not locked to the 50-85% SOC taper start range: the BMS SOC is unreliable on LFP, so the
+  // user picks the taper (SOC and/or max cell voltage) themselves. Set Battery chemistry to LFP in settings.
+  bool mandatory_charge_taper() { return user_selected_battery_chemistry != battery_chemistry_enum::LFP; }
   // Use the default constructor to create the first or single battery.
   TeslaBattery() : renderer(&datalayer_extended.tesla, &datalayer.battery) {
     datalayer_battery = &datalayer.battery;

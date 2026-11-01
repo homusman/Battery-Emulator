@@ -57,6 +57,9 @@ bool inverter_low_pass_filter = false;  //Should the charge/discharge limits be 
 bool charge_taper_soc = false;  //Should the charge power limit be tapered based on scaled SOC near full?
 uint16_t charge_taper_band_pptt =
     500;  //Taper band in pptt. 500 = taper starts at 95.00% scaled SOC, reaching 0W at 100.00%
+bool charge_taper_voltage = false;  //Taper the charge power limit on max cell voltage instead of/as well as SOC
+uint16_t charge_taper_v_start_mV = 3400;  //Max cell voltage where the voltage taper starts (full power below this)
+uint16_t charge_taper_v_end_mV = 3450;    //Max cell voltage where the voltage taper reaches 0W
 uint16_t charge_taper_floor_W =
     0;  //Minimum charge power in W held during tapering until 100.00% scaled SOC. 0 = disabled, taper goes linearly to 0W
 
