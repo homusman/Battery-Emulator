@@ -294,6 +294,13 @@ static String shunt_option_css(const char* attr, bool (*supported)(ShuntType, En
 
 String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& settings);
 
+// A number input outside its min/max stops the browser submitting the form, and it does so
+// silently when the input sits in a hidden section. Values shown in the form are therefore
+// always pulled into the range the input accepts.
+static uint32_t clamp_u32(uint32_t value, uint32_t lo, uint32_t hi) {
+  return value < lo ? lo : (value > hi ? hi : value);
+}
+
 String settings_processor(const String& var, BatteryEmulatorSettingsStore& settings) {
   // HTML-ready values (such as select options) are returned here. These don't
   // get any additional escaping.
@@ -625,63 +632,55 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
   }
 
   if (var == "CHGTAPERSTART") {
-    uint32_t start = settings.getUInt("CHGTAPERSTART", 95);
-    if (battery && battery->mandatory_charge_taper()) {
-      if (start > 85) {
-        start = 85;
-      }
-      if (start < 50) {
-        start = 50;
-      }
-    }
-    return String(start);
+    const uint32_t max_start = (battery && battery->mandatory_charge_taper()) ? 85 : 99;
+    return String(clamp_u32(settings.getUInt("CHGTAPERSTART", 95), 50, max_start));
   }
 
   if (var == "CHGTAPERFLOOR") {
-    return String(settings.getUInt("CHGTAPERFLOOR", 400));
+    return String(clamp_u32(settings.getUInt("CHGTAPERFLOOR", 400), 0, 2000));
   }
 
   if (var == "CHGTAPERV") {
     return settings.getBool("CHGTAPERV") ? "checked" : "";
   }
   if (var == "CHGTAPERVSTART") {
-    return String(settings.getUInt("CHGTAPERVSTART", 3400));
+    return String(clamp_u32(settings.getUInt("CHGTAPERVSTART", 3400), 3000, 3600));
   }
   if (var == "CHGTAPERVEND") {
-    return String(settings.getUInt("CHGTAPERVEND", 3450));
+    return String(clamp_u32(settings.getUInt("CHGTAPERVEND", 3450), 3000, 3650));
   }
   if (var == "SOCOBS") {
     return settings.getBool("SOCOBS") ? "checked" : "";
   }
   if (var == "SOCOBSCAPAH") {
-    return String(settings.getUInt("SOCOBSCAPAH", 0));
+    return String(clamp_u32(settings.getUInt("SOCOBSCAPAH", 0), 0, 2000));
   }
   if (var == "SOCOBSAUTO") {
     return settings.getBool("SOCOBSAUTO") ? "checked" : "";
   }
   if (var == "SOCOBSMAXDELTA") {
-    return String(settings.getUInt("SOCOBSMAXDELTA", 10));
+    return String(clamp_u32(settings.getUInt("SOCOBSMAXDELTA", 10), 1, 50));
   }
   if (var == "SOCOBSLRATE") {
-    return String(settings.getUInt("SOCOBSLRATE", 50));
+    return String(clamp_u32(settings.getUInt("SOCOBSLRATE", 50), 0, 100));
   }
   if (var == "SOCOBSFULLMV") {
-    return String(settings.getUInt("SOCOBSFULLMV", 3360));
+    return String(clamp_u32(settings.getUInt("SOCOBSFULLMV", 3360), 2500, 4300));
   }
   if (var == "SOCOBSEMPTYMV") {
-    return String(settings.getUInt("SOCOBSEMPTYMV", 3150));
+    return String(clamp_u32(settings.getUInt("SOCOBSEMPTYMV", 3150), 2000, 4000));
   }
   if (var == "SOCOBSFULLPCT") {
-    return String(settings.getUInt("SOCOBSFULLPCT", 100));
+    return String(clamp_u32(settings.getUInt("SOCOBSFULLPCT", 100), 50, 100));
   }
   if (var == "SOCOBSEMPTYPCT") {
-    return String(settings.getUInt("SOCOBSEMPTYPCT", 0));
+    return String(clamp_u32(settings.getUInt("SOCOBSEMPTYPCT", 0), 0, 50));
   }
   if (var == "SOCOBSMAXW") {
-    return String(settings.getUInt("SOCOBSMAXW", 500));
+    return String(clamp_u32(settings.getUInt("SOCOBSMAXW", 500), 0, 20000));
   }
   if (var == "SOCOBSTMO") {
-    return String(settings.getUInt("SOCOBSTMO", 60));
+    return String(clamp_u32(settings.getUInt("SOCOBSTMO", 60), 5, 3600));
   }
 
   if (var == "SLOWCANINV") {
