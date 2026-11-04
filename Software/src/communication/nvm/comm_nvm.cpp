@@ -220,7 +220,10 @@ void init_stored_settings() {
   charge_taper_v_start_mV = settings.getUInt("CHGTAPERVSTART", 3400);
   charge_taper_v_end_mV = settings.getUInt("CHGTAPERVEND", 3450);
   soc_observer_enabled = settings.getBool("SOCOBS", false);
-  soc_observer_capacity_Wh = settings.getUInt("SOCOBSCAP", 0);
+  soc_observer_capacity_Ah = settings.getUInt("SOCOBSCAPAH", 0);
+  soc_observer_auto_capacity = settings.getBool("SOCOBSAUTO", false);
+  soc_observer_learn_max_delta_pct = settings.getUInt("SOCOBSMAXDELTA", 10);
+  soc_observer_learn_rate_pct = settings.getUInt("SOCOBSLRATE", 50);
   soc_observer_full_mV = settings.getUInt("SOCOBSFULLMV", 3360);
   soc_observer_empty_mV = settings.getUInt("SOCOBSEMPTYMV", 3150);
   soc_observer_full_pptt = settings.getUInt("SOCOBSFULLPCT", 100) * 100;

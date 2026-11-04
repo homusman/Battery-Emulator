@@ -7,27 +7,41 @@
 #include "logging.h"
 
 bool soc_observer_enabled = false;
-uint32_t soc_observer_capacity_Wh = 0;
+uint32_t soc_observer_capacity_Ah = 0;
+bool soc_observer_auto_capacity = false;
+uint16_t soc_observer_learn_max_delta_pct = 10;
+uint16_t soc_observer_learn_rate_pct = 50;
 uint16_t soc_observer_full_mV = 3360;
 uint16_t soc_observer_empty_mV = 3150;
 uint16_t soc_observer_full_pptt = 10000;
 uint16_t soc_observer_empty_pptt = 0;
 uint16_t soc_observer_anchor_max_W = 500;
 uint16_t soc_observer_timeout_s = 60;
+uint16_t soc_observer_bms_pptt = 0;
+bool soc_observer_bms_valid = false;
+SocObserverStats soc_observer_stats;
 
 /* An anchor has to hold this long before it counts, so a spike or a sag cannot reset the counter */
 static constexpr float ANCHOR_DEBOUNCE_S = 20.0f;
-/* Longest step integrated in one go. A stalled loop must not turn into a huge energy jump */
+/* Longest step integrated in one go. A stalled loop must not turn into a huge jump */
 static constexpr float MAX_STEP_S = 5.0f;
 /* Flash is only written when SOC moved this much (0.01% units) and at most this often */
 static constexpr float SAVE_STEP_PPTT = 100.0f;
 static constexpr uint32_t SAVE_MIN_INTERVAL_MS = 60000;
+/* A leg shorter than this cannot be a real charge or discharge between the anchors */
+static constexpr float MIN_LEG_S = 300.0f;
 
 // Written from the MQTT task, read from the main loop
 static volatile float rx_power_W = 0.0f;
 static volatile uint32_t rx_power_ms = 0;
 static volatile bool rx_power_valid = false;
 static volatile int32_t pending_soc_pptt = -1;
+
+/* Capacity learned from clean legs, in mAh, 0 = nothing learned. Kept in NVM together with the manual
+   capacity it grew from, so changing the manual capacity in settings starts the learning over. */
+static uint32_t learned_mAh = 0;
+/* Estimated once from the pack's own figures when no capacity has been set */
+static uint32_t estimated_mAh = 0;
 
 void soc_observer_set_power(float power_W) {
   if (isnan(power_W) || isinf(power_W)) {
@@ -50,12 +64,29 @@ static void save_soc(float soc_pptt) {
   settings.saveUInt("SOCOBSPPTT", (uint32_t)lroundf(soc_pptt));
 }
 
+static void save_learned() {
+  BatteryEmulatorSettingsStore settings;
+  settings.saveUInt("SOCOBSLMAH", learned_mAh);
+}
+
+/* Capacity in use, in mAh. Order: learned (when learning is on), the manual setting, the estimate. */
+static uint32_t eff_cap_mAh() {
+  if (soc_observer_auto_capacity && learned_mAh > 0) {
+    return learned_mAh;
+  }
+  if (soc_observer_capacity_Ah > 0) {
+    return soc_observer_capacity_Ah * 1000u;
+  }
+  return estimated_mAh;
+}
+
 void soc_observer_update() {
   if (!soc_observer_enabled) {
     return;
   }
 
   static bool initialised = false;
+  static bool learned_loaded = false;
   static float soc_pptt = 0.0f;
   static float last_saved_pptt = 0.0f;
   static uint32_t last_ms = 0;
@@ -64,23 +95,68 @@ void soc_observer_update() {
   static bool at_empty = false;  // counter sits exactly on the empty anchor
   static float full_s = 0.0f;    // how long the full condition has held
   static float empty_s = 0.0f;
-  static bool full_fired = false;   // an anchor fires once per time the condition becomes true
+  static bool full_fired = false;  // an anchor fires once per time the condition becomes true
   static bool empty_fired = false;
   static bool was_fresh = false;
-  static bool have_empty_ref = false;  // an empty anchor was seen, with a gap-free count since
-  static float net_since_empty_Wh = 0.0f;
+  // The leg in progress: what went through the pack since the last anchor
+  static int leg_start = 0;  // 0 = no leg being followed, 1 = started at the full anchor, 2 = at the empty anchor
+  static bool leg_dirty = false;
+  static const char* leg_why = nullptr;  // first reason the leg stopped being clean
+  static float leg_Wh = 0.0f;
+  static float leg_Ah = 0.0f;
+  static float leg_s = 0.0f;
+  static bool estimate_logged = false;
 
   DATALAYER_BATTERY_STATUS_TYPE& st = datalayer.battery.status;
   const uint32_t now = millis();
 
-  const uint32_t cap_Wh =
-      soc_observer_capacity_Wh > 0 ? soc_observer_capacity_Wh : datalayer.battery.info.total_capacity_Wh;
-  if (cap_Wh == 0) {
-    return;
+  auto mark_dirty = [&](const char* why) {
+    if (!leg_dirty) {
+      leg_dirty = true;
+      leg_why = why;
+    }
+  };
+
+  /* The driver has just written its own SOC: keep it for display before anything below replaces it */
+  soc_observer_bms_pptt = st.real_soc;
+  soc_observer_bms_valid = true;
+
+  if (!learned_loaded) {
+    BatteryEmulatorSettingsStore settings(true);
+    const uint32_t base = settings.getUInt("SOCOBSLBASE", 0xFFFFFFFF);
+    const uint32_t manual_mAh = soc_observer_capacity_Ah * 1000u;
+    if (base == manual_mAh) {
+      learned_mAh = settings.getUInt("SOCOBSLMAH", 0);
+    } else {
+      // The manual capacity was changed since anything was learned: start again from the new figure
+      learned_mAh = 0;
+      BatteryEmulatorSettingsStore writer;
+      writer.saveUInt("SOCOBSLBASE", manual_mAh);
+      writer.saveUInt("SOCOBSLMAH", 0);
+    }
+    learned_loaded = true;
+  }
+
+  if (eff_cap_mAh() == 0) {
+    /* Nothing set: estimate Ah from the pack's energy figure at its present voltage, once, so the counter
+       does not wobble with the voltage. Wrong by some percent at most, and learning can fix it. */
+    if (st.voltage_dV > 500 && datalayer.battery.info.total_capacity_Wh > 0) {
+      estimated_mAh = (uint32_t)((double)datalayer.battery.info.total_capacity_Wh * 10000.0 / (double)st.voltage_dV);
+    }
+  }
+  soc_observer_stats.cap_mAh = eff_cap_mAh();
+  if (soc_observer_stats.cap_mAh == 0) {
+    return;  // no capacity and nothing to estimate from yet, leave the BMS values in place
+  }
+  if (soc_observer_capacity_Ah == 0 && learned_mAh == 0 && !estimate_logged) {
+    logging.printf("SOC observer: no capacity set, estimating %.1f Ah from the battery's own figure. Set it in settings.\n",
+                   estimated_mAh / 1000.0f);
+    estimate_logged = true;
   }
 
   /* Forced balancing makes the Tesla driver pin its own SOC, leave that alone */
   if (datalayer.battery_settings.user_requests_balancing) {
+    mark_dirty("forced balancing");
     return;
   }
 
@@ -105,6 +181,7 @@ void soc_observer_update() {
   last_ms = now;
   if (dt_s > MAX_STEP_S) {
     dt_s = MAX_STEP_S;
+    mark_dirty("loop stalled");  // charge was missed
   }
 
   bool save_now = false;
@@ -114,7 +191,7 @@ void soc_observer_update() {
     soc_pptt = (float)pending;
     at_full = false;
     at_empty = false;
-    have_empty_ref = false;
+    leg_start = 0;  // a manual SOC makes the leg in progress meaningless
     save_now = true;
     logging.printf("SOC observer set to %.2f%%\n", soc_pptt / 100.0f);
   }
@@ -124,17 +201,25 @@ void soc_observer_update() {
   const float power_W = fresh ? rx_power_W : 0.0f;
   if (fresh != was_fresh) {
     logging.printf(fresh ? "SOC observer: power input is back\n"
-                         : "SOC observer: power input is missing, holding SOC (no integration, no full anchor)\n");
-    if (!fresh) {
-      have_empty_ref = false;  // an energy gap makes the capacity measurement useless
-    }
+                         : "SOC observer: power input is missing, holding SOC (no counting, no full anchor)\n");
     was_fresh = fresh;
   }
+  if (!fresh) {
+    mark_dirty("power input missing");
+  }
 
+  const bool voltage_ok = st.voltage_dV > 10;
   if (fresh) {
-    const float dWh = power_W * dt_s / 3600.0f;
-    soc_pptt += dWh / (float)cap_Wh * 10000.0f;
-    net_since_empty_Wh += dWh;
+    if (voltage_ok) {
+      const float dWh = power_W * dt_s / 3600.0f;
+      const float dAh = (power_W / ((float)st.voltage_dV / 10.0f)) * dt_s / 3600.0f;
+      soc_pptt += dAh * 1000.0f / (float)soc_observer_stats.cap_mAh * 10000.0f;
+      leg_Wh += dWh;
+      leg_Ah += dAh;
+      leg_s += dt_s;
+    } else {
+      mark_dirty("no pack voltage");
+    }
   }
 
   /* Anchors */
@@ -152,25 +237,75 @@ void soc_observer_update() {
   } else {
     empty_s = 0.0f;
   }
-
   if (full_s == 0.0f) {
     full_fired = false;
   }
   if (empty_s == 0.0f) {
     empty_fired = false;
   }
+
+  /* A leg ends at the opposite anchor and the next one starts there. Reaching the same anchor again
+     (discharged a little, then back to full) is not a leg, it just restarts the count. */
+  auto finish_leg = [&](bool at_full_anchor) {
+    const float span = (float)(soc_observer_full_pptt - soc_observer_empty_pptt) / 10000.0f;
+    const bool expected = at_full_anchor ? (leg_start == 2) : (leg_start == 1);
+    const float Wh = at_full_anchor ? leg_Wh : -leg_Wh;
+    const float Ah = at_full_anchor ? leg_Ah : -leg_Ah;
+    const char* name = at_full_anchor ? "charge" : "discharge";
+    if (expected && span > 0.05f && Wh > 0.0f && Ah > 0.0f) {
+      SocObserverLeg leg;
+      leg.valid = true;
+      leg.Wh = Wh;
+      leg.Ah = Ah;
+      leg.minutes = leg_s / 60.0f;
+      (at_full_anchor ? soc_observer_stats.all_charge : soc_observer_stats.all_discharge) = leg;
+
+      const bool clean = !leg_dirty && leg_s >= MIN_LEG_S;
+      if (clean) {
+        (at_full_anchor ? soc_observer_stats.clean_charge : soc_observer_stats.clean_discharge) = leg;
+        logging.printf("SOC observer: clean %s leg, %.0f Wh and %.1f Ah between the anchors in %.0f min\n", name, Wh, Ah,
+                       leg.minutes);
+      } else {
+        logging.printf("SOC observer: unclean %s leg (%s), %.0f Wh and %.1f Ah in %.0f min, not used for learning\n",
+                       name, leg_dirty ? leg_why : "too short", Wh, Ah, leg.minutes);
+      }
+
+      if (clean && soc_observer_auto_capacity) {
+        const float measured_mAh = Ah * 1000.0f / span;
+        const float cur_mAh = (float)eff_cap_mAh();
+        const float dev_pct = 100.0f * fabsf(measured_mAh - cur_mAh) / cur_mAh;
+        if (soc_observer_learn_rate_pct == 0) {
+          // never update: nothing to do
+        } else if (dev_pct <= (float)soc_observer_learn_max_delta_pct) {
+          const float rate = (float)soc_observer_learn_rate_pct / 100.0f;
+          const float next_mAh = (1.0f - rate) * cur_mAh + rate * measured_mAh;
+          learned_mAh = (uint32_t)lroundf(next_mAh);
+          save_learned();
+          logging.printf("SOC observer: capacity %.1f Ah -> %.1f Ah (leg measured %.1f Ah, %.1f%% off, rate %u%%)\n",
+                         cur_mAh / 1000.0f, next_mAh / 1000.0f, measured_mAh / 1000.0f, dev_pct,
+                         (unsigned)soc_observer_learn_rate_pct);
+        } else {
+          logging.printf("SOC observer: leg measured %.1f Ah, %.1f%% from the %.1f Ah in use (limit %u%%), not applied\n",
+                         measured_mAh / 1000.0f, dev_pct, cur_mAh / 1000.0f, (unsigned)soc_observer_learn_max_delta_pct);
+        }
+      }
+    }
+    leg_start = at_full_anchor ? 1 : 2;
+    leg_Wh = 0.0f;
+    leg_Ah = 0.0f;
+    leg_s = 0.0f;
+    leg_dirty = false;
+    leg_why = nullptr;
+  };
+
   if (!full_fired && full_s >= ANCHOR_DEBOUNCE_S && soc_pptt < (float)soc_observer_full_pptt) {
     full_fired = true;
     logging.printf("SOC observer: full anchor (max cell %u mV), SOC %.2f%% -> %.2f%%\n", st.cell_max_voltage_mV,
                    soc_pptt / 100.0f, soc_observer_full_pptt / 100.0f);
-    if (have_empty_ref && net_since_empty_Wh > 0.0f && soc_observer_full_pptt > soc_observer_empty_pptt) {
-      const float span = (float)(soc_observer_full_pptt - soc_observer_empty_pptt) / 10000.0f;
-      logging.printf("SOC observer: %.0f Wh in since the empty anchor, implies %.0f Wh between the anchors\n",
-                     net_since_empty_Wh, net_since_empty_Wh / span);
-    }
     soc_pptt = (float)soc_observer_full_pptt;
     at_full = true;
     save_now = true;
+    finish_leg(true);
   }
   if (!empty_fired && empty_s >= ANCHOR_DEBOUNCE_S && soc_pptt > (float)soc_observer_empty_pptt) {
     empty_fired = true;
@@ -178,10 +313,10 @@ void soc_observer_update() {
                    soc_pptt / 100.0f, soc_observer_empty_pptt / 100.0f);
     soc_pptt = (float)soc_observer_empty_pptt;
     at_empty = true;
-    have_empty_ref = fresh;
-    net_since_empty_Wh = 0.0f;
     save_now = true;
+    finish_leg(false);
   }
+  soc_observer_stats.cap_mAh = eff_cap_mAh();  // a leg may just have changed it
 
   /* The counter alone never reaches the anchor values: it stops one step short and waits for the
      cell voltage to confirm. Only the anchor itself puts it exactly on full or empty, which is
@@ -201,10 +336,14 @@ void soc_observer_update() {
     at_empty = false;
   }
 
-  /* Hand the result to the rest of BE */
+  /* Hand the result to the rest of BE. Remaining energy is the remaining charge at the voltage the pack
+     really delivered on the last clean discharge, or at the present voltage until there is one. */
   st.real_soc = (uint16_t)lroundf(soc_pptt);
-  st.remaining_capacity_Wh = (uint32_t)((double)cap_Wh * (double)soc_pptt / 10000.0);
-  if (fresh && st.voltage_dV > 10) {
+  const SocObserverLeg& dis = soc_observer_stats.clean_discharge;
+  const double volts = (dis.valid && dis.Ah > 0.0f) ? (double)dis.Wh / (double)dis.Ah : (double)st.voltage_dV / 10.0;
+  st.remaining_capacity_Wh =
+      (uint32_t)((double)soc_observer_stats.cap_mAh / 1000.0 * (double)soc_pptt / 10000.0 * volts);
+  if (fresh && voltage_ok) {
     int32_t dA = (int32_t)lroundf(power_W * 100.0f / (float)st.voltage_dV);
     if (dA > INT16_MAX) {
       dA = INT16_MAX;

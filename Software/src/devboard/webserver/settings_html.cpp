@@ -653,8 +653,17 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
   if (var == "SOCOBS") {
     return settings.getBool("SOCOBS") ? "checked" : "";
   }
-  if (var == "SOCOBSCAP") {
-    return String(settings.getUInt("SOCOBSCAP", 0));
+  if (var == "SOCOBSCAPAH") {
+    return String(settings.getUInt("SOCOBSCAPAH", 0));
+  }
+  if (var == "SOCOBSAUTO") {
+    return settings.getBool("SOCOBSAUTO") ? "checked" : "";
+  }
+  if (var == "SOCOBSMAXDELTA") {
+    return String(settings.getUInt("SOCOBSMAXDELTA", 10));
+  }
+  if (var == "SOCOBSLRATE") {
+    return String(settings.getUInt("SOCOBSLRATE", 50));
   }
   if (var == "SOCOBSFULLMV") {
     return String(settings.getUInt("SOCOBSFULLMV", 3360));
@@ -1896,6 +1905,11 @@ String qnhck_zero_text(uint16_t zero_mV) {
       display: contents;
     }
 
+    form .if-socobsauto { display: none; }
+    form[data-socobsauto="true"] .if-socobsauto {
+      display: contents;
+    }
+
     form .if-mqtt { display: none; }
     form[data-mqttenabled="true"] .if-mqtt {
       display: contents;
@@ -2399,9 +2413,22 @@ String qnhck_zero_text(uint16_t zero_mV) {
         <input type='checkbox' name='SOCOBS' value='on' %SOCOBS% />
 
         <div class='if-socobs'>
-        <label>Observer usable capacity, Wh (0 = battery default): </label>
-        <input type='number' name='SOCOBSCAP' value="%SOCOBSCAP%"
-        min="0" max="500000" step="1" />
+        <label>Observer usable capacity between the anchors, Ah (0 = estimate): </label>
+        <input type='number' name='SOCOBSCAPAH' value="%SOCOBSCAPAH%"
+        min="0" max="2000" step="1" />
+
+        <label>Learn capacity from clean anchor-to-anchor legs:</label>
+        <input type='checkbox' name='SOCOBSAUTO' value='on' %SOCOBSAUTO% />
+
+        <div class='if-socobsauto'>
+        <label>Learning: max deviation from the capacity in use, %: </label>
+        <input type='number' name='SOCOBSMAXDELTA' value="%SOCOBSMAXDELTA%"
+        min="1" max="50" step="1" />
+
+        <label>Learning rate, % (100 = take the measured value, 0 = never change): </label>
+        <input type='number' name='SOCOBSLRATE' value="%SOCOBSLRATE%"
+        min="0" max="100" step="1" />
+        </div>
 
         <label>Full anchor: max cell at or above, mV: </label>
         <input type='number' name='SOCOBSFULLMV' value="%SOCOBSFULLMV%"

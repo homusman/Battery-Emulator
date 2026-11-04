@@ -191,6 +191,10 @@ static bool always(Battery* b) {
 static bool single_pack(Battery* b) {
   return datalayer.system.info.configured_batteries < 2;
 }
+// The BMS's own SOC is only worth a sensor while the SOC observer is replacing it (pack 1 only)
+static bool soc_observer_shows_bms(Battery* b) {
+  return soc_observer_enabled && datalayer.system.info.configured_batteries < 2;
+}
 static bool supports_charged(Battery* b) {
   return b->supports_charged_energy();
 }
@@ -229,6 +233,22 @@ static bool heap_metrics_enabled(Battery* b) {
 static const SensorConfig batterySensorConfigTemplate[] = {
     {"SOC", "SoC (scaled)", "%", "battery", single_pack},
     {"SOC_real", "SoC (real)", "%", "battery", always},
+    {"SOC_bms", "SoC (BMS, before observer)", "%", "battery", soc_observer_shows_bms},
+    // SOC observer: what went through the pack between the two anchors. "clean" is the last leg that
+    // qualified (and can teach the capacity), "all" is the last leg completed in each direction, clean or not.
+    {"observer_capacity_ah", "Observer capacity in use", "Ah", "", soc_observer_shows_bms},
+    {"observer_charge_kwh", "Observer charge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
+    {"observer_discharge_kwh", "Observer discharge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
+    {"observer_charge_ah", "Observer charge leg, clean (Ah)", "Ah", "", soc_observer_shows_bms},
+    {"observer_discharge_ah", "Observer discharge leg, clean (Ah)", "Ah", "", soc_observer_shows_bms},
+    {"observer_roundtrip_eff", "Observer round trip efficiency, clean (energy)", "%", "", soc_observer_shows_bms},
+    {"observer_coulombic_eff", "Observer round trip efficiency, clean (Ah)", "%", "", soc_observer_shows_bms},
+    {"observer_all_charge_kwh", "Observer charge leg, all", "kWh", "energy_storage", soc_observer_shows_bms},
+    {"observer_all_discharge_kwh", "Observer discharge leg, all", "kWh", "energy_storage", soc_observer_shows_bms},
+    {"observer_all_charge_ah", "Observer charge leg, all (Ah)", "Ah", "", soc_observer_shows_bms},
+    {"observer_all_discharge_ah", "Observer discharge leg, all (Ah)", "Ah", "", soc_observer_shows_bms},
+    {"observer_all_roundtrip_eff", "Observer round trip efficiency, all (energy)", "%", "", soc_observer_shows_bms},
+    {"observer_all_coulombic_eff", "Observer round trip efficiency, all (Ah)", "%", "", soc_observer_shows_bms},
     // No device_class: "battery" would file this next to the state of charge in Home Assistant
     // and take its icon, which is misleading for a health figure. state_class and the unit are
     // set explicitly further down instead.
@@ -512,6 +532,34 @@ void set_battery_attributes(JsonDocument& doc, const DATALAYER_BATTERY_TYPE& bat
     doc["SOC"] = ((float)battery_data.status.reported_soc) / 100.0f;
   }
   doc["SOC_real"] = ((float)battery_data.status.real_soc) / 100.0f;
+  if (soc_observer_enabled && soc_observer_bms_valid && &battery_data == &datalayer.battery) {
+    doc["SOC_bms"] = ((float)soc_observer_bms_pptt) / 100.0f;  // What the BMS said before the observer replaced it
+  }
+  if (soc_observer_enabled && &battery_data == &datalayer.battery) {
+    // Leg figures are omitted until a leg has been completed, so they read unknown rather than 0
+    const SocObserverStats& os = soc_observer_stats;
+    if (os.cap_mAh > 0) {
+      doc["observer_capacity_ah"] = ((float)os.cap_mAh) / 1000.0f;
+    }
+    // kwh / Ah per direction, then the efficiencies once both directions have a leg. The "all" keys
+    // carry an extra "all_" in the middle.
+    auto publish_legs = [&](const SocObserverLeg& chg, const SocObserverLeg& dis, bool all) {
+      if (chg.valid) {
+        doc[all ? "observer_all_charge_kwh" : "observer_charge_kwh"] = chg.Wh / 1000.0f;
+        doc[all ? "observer_all_charge_ah" : "observer_charge_ah"] = chg.Ah;
+      }
+      if (dis.valid) {
+        doc[all ? "observer_all_discharge_kwh" : "observer_discharge_kwh"] = dis.Wh / 1000.0f;
+        doc[all ? "observer_all_discharge_ah" : "observer_discharge_ah"] = dis.Ah;
+      }
+      if (chg.valid && dis.valid && chg.Wh > 0.0f && chg.Ah > 0.0f) {
+        doc[all ? "observer_all_roundtrip_eff" : "observer_roundtrip_eff"] = 100.0f * dis.Wh / chg.Wh;
+        doc[all ? "observer_all_coulombic_eff" : "observer_coulombic_eff"] = 100.0f * dis.Ah / chg.Ah;
+      }
+    };
+    publish_legs(os.clean_charge, os.clean_discharge, false);
+    publish_legs(os.all_charge, os.all_discharge, true);
+  }
   // Omit until the integration has decoded a real state of health, so HA shows "unknown"
   // instead of the soh_pptt default presented as if it had been read from the pack.
   if (battery_data.status.soh_available) {
@@ -674,6 +722,15 @@ static const char* sensor_discovery_icon(const char* entity_id, const char* devi
     if (strcmp(entity_id, "leaf_capacity_ah") == 0) {
       return "mdi:car-battery";
     }
+    if (strncmp(entity_id, "observer_", strlen("observer_")) == 0) {
+      const size_t n = strlen(entity_id);
+      if (n >= 3 && strcmp(entity_id + n - 3, "_ah") == 0) {
+        return "mdi:car-battery";
+      }
+      if (n >= 4 && strcmp(entity_id + n - 4, "_eff") == 0) {
+        return "mdi:percent";
+      }
+    }
     if (strcmp(entity_id, "charging_state") == 0) {
       return "mdi:home-battery";
     }
@@ -768,6 +825,13 @@ static bool publish_sensor_discovery(const SensorConfig& config, const char* id_
       strcmp(config.entity_id, "state_of_health") == 0) {
     doc["state_class"] = "measurement";
     doc["suggested_display_precision"] = 2;
+  }
+  // The observer leg figures: kWh ones already get a measurement state_class from their
+  // energy_storage device_class. The Ah and efficiency ones have none, so set it here for long-term
+  // statistics, and pick a sensible number of decimals.
+  if (strncmp(config.entity_id, "observer_", strlen("observer_")) == 0) {
+    doc["state_class"] = "measurement";
+    doc["suggested_display_precision"] = (config.unit != nullptr && strcmp(config.unit, "%") == 0) ? 1 : 2;
   }
   // "heap_fragmentation" is a percentage with no matching device_class either. Mark it as a
   // measurement and show one decimal, like the ESPHome debug sensor does.
