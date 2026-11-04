@@ -2421,11 +2421,11 @@ String qnhck_zero_text(uint16_t zero_mV) {
         <input type='checkbox' name='SOCOBSAUTO' value='on' %SOCOBSAUTO% />
 
         <div class='if-socobsauto'>
-        <label>Learning: max deviation from the capacity in use, %: </label>
+        <label>Learning: max deviation from the capacity in use, percent: </label>
         <input type='number' name='SOCOBSMAXDELTA' value="%SOCOBSMAXDELTA%"
         min="1" max="50" step="1" />
 
-        <label>Learning rate, % (100 = take the measured value, 0 = never change): </label>
+        <label>Learning rate, percent (100 = take the measured value, 0 = never change): </label>
         <input type='number' name='SOCOBSLRATE' value="%SOCOBSLRATE%"
         min="0" max="100" step="1" />
         </div>
