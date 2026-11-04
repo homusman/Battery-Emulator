@@ -236,6 +236,8 @@ static const SensorConfig batterySensorConfigTemplate[] = {
     {"SOC_bms", "SoC (BMS, before observer)", "%", "battery", soc_observer_shows_bms},
     // SOC observer: what went through the pack between the two anchors. "clean" is the last leg that
     // qualified (and can teach the capacity), "all" is the last leg completed in each direction, clean or not.
+    // With the observer on, State of Health above is the observer's own figure. This is the BMS's.
+    {"state_of_health_bms", "State of Health (BMS)", "%", "", soc_observer_shows_bms},
     {"observer_capacity_ah", "Observer capacity in use", "Ah", "", soc_observer_shows_bms},
     {"observer_charge_kwh", "Observer charge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
     {"observer_discharge_kwh", "Observer discharge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
@@ -541,6 +543,9 @@ void set_battery_attributes(JsonDocument& doc, const DATALAYER_BATTERY_TYPE& bat
     if (os.cap_mAh > 0) {
       doc["observer_capacity_ah"] = ((float)os.cap_mAh) / 1000.0f;
     }
+    if (soc_observer_bms_soh_valid) {
+      doc["state_of_health_bms"] = ((float)soc_observer_bms_soh_pptt) / 100.0f;
+    }
     // kwh / Ah per direction, then the efficiencies once both directions have a leg. The "all" keys
     // carry an extra "all_" in the middle.
     auto publish_legs = [&](const SocObserverLeg& chg, const SocObserverLeg& dis, bool all) {
@@ -822,7 +827,7 @@ static bool publish_sensor_discovery(const SensorConfig& config, const char* id_
   // state_class assignment above too. Mark them as measurements and show two decimals, like
   // LeafSpy does.
   if (strcmp(config.entity_id, "leaf_hx") == 0 || strcmp(config.entity_id, "leaf_soh_raw") == 0 ||
-      strcmp(config.entity_id, "state_of_health") == 0) {
+      strcmp(config.entity_id, "state_of_health") == 0 || strcmp(config.entity_id, "state_of_health_bms") == 0) {
     doc["state_class"] = "measurement";
     doc["suggested_display_precision"] = 2;
   }

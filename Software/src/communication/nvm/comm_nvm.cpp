@@ -224,6 +224,8 @@ void init_stored_settings() {
   soc_observer_auto_capacity = settings.getBool("SOCOBSAUTO", false);
   soc_observer_learn_max_delta_pct = settings.getUInt("SOCOBSMAXDELTA", 10);
   soc_observer_learn_rate_pct = settings.getUInt("SOCOBSLRATE", 50);
+  soc_observer_count_energy = settings.getBool("SOCOBSENERGY", false);
+  soc_observer_energy_save_Wh = settings.getUInt("SOCOBSESAVE", 1000);
   soc_observer_full_mV = settings.getUInt("SOCOBSFULLMV", 3360);
   soc_observer_empty_mV = settings.getUInt("SOCOBSEMPTYMV", 3150);
   soc_observer_full_pptt = settings.getUInt("SOCOBSFULLPCT", 100) * 100;

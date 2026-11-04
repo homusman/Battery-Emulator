@@ -4,6 +4,7 @@
 #include <math.h>
 #include "../../communication/nvm/comm_nvm.h"
 #include "../../datalayer/datalayer.h"
+#include "../../datalayer/datalayer_extended.h"
 #include "logging.h"
 
 bool soc_observer_enabled = false;
@@ -17,6 +18,10 @@ uint16_t soc_observer_full_pptt = 10000;
 uint16_t soc_observer_empty_pptt = 0;
 uint16_t soc_observer_anchor_max_W = 500;
 uint16_t soc_observer_timeout_s = 60;
+bool soc_observer_count_energy = false;
+uint32_t soc_observer_energy_save_Wh = 1000;
+uint16_t soc_observer_bms_soh_pptt = 0;
+bool soc_observer_bms_soh_valid = false;
 uint16_t soc_observer_bms_pptt = 0;
 bool soc_observer_bms_valid = false;
 SocObserverStats soc_observer_stats;
@@ -42,6 +47,15 @@ static volatile int32_t pending_soc_pptt = -1;
 static uint32_t learned_mAh = 0;
 /* Estimated once from the pack's own figures when no capacity has been set */
 static uint32_t estimated_mAh = 0;
+/* Mean voltage the pack delivered over the last clean discharge leg (0.1 V units, Wh / Ah), kept in NVM.
+   Turns the capacity in Ah into energy when it is compared with the BMS's beginning of life energy. */
+static uint32_t vref_dV = 0;
+
+/* Lifetime energy through the pack terminals, counted from the power input while the totals are enabled */
+static double energy_charged_Wh = 0.0;
+static double energy_discharged_Wh = 0.0;
+static double energy_unsaved_Wh = 0.0;  // moved since the totals were last written to flash
+static bool energy_ready = false;
 
 void soc_observer_set_power(float power_W) {
   if (isnan(power_W) || isinf(power_W)) {
@@ -67,6 +81,18 @@ static void save_soc(float soc_pptt) {
 static void save_learned() {
   BatteryEmulatorSettingsStore settings;
   settings.saveUInt("SOCOBSLMAH", learned_mAh);
+}
+
+static void save_vref() {
+  BatteryEmulatorSettingsStore settings;
+  settings.saveUInt("SOCOBSVREF", vref_dV);
+}
+
+static void save_energy() {
+  BatteryEmulatorSettingsStore settings;
+  settings.saveUInt("SOCOBSECHG", (uint32_t)energy_charged_Wh);
+  settings.saveUInt("SOCOBSEDIS", (uint32_t)energy_discharged_Wh);
+  energy_unsaved_Wh = 0.0;
 }
 
 /* Capacity in use, in mAh. Order: learned (when learning is on), the manual setting, the estimate. */
@@ -106,6 +132,7 @@ void soc_observer_update() {
   static float leg_Ah = 0.0f;
   static float leg_s = 0.0f;
   static bool estimate_logged = false;
+  static uint32_t energy_wait_start_ms = 0;
 
   DATALAYER_BATTERY_STATUS_TYPE& st = datalayer.battery.status;
   const uint32_t now = millis();
@@ -123,6 +150,7 @@ void soc_observer_update() {
 
   if (!learned_loaded) {
     BatteryEmulatorSettingsStore settings(true);
+    vref_dV = settings.getUInt("SOCOBSVREF", 0);
     const uint32_t base = settings.getUInt("SOCOBSLBASE", 0xFFFFFFFF);
     const uint32_t manual_mAh = soc_observer_capacity_Ah * 1000u;
     if (base == manual_mAh) {
@@ -177,6 +205,31 @@ void soc_observer_update() {
     logging.printf("SOC observer started at %.2f%%\n", soc_pptt / 100.0f);
   }
 
+  /* Lifetime energy totals: continue from what the BMS shows the first time, or from what was saved.
+     The BMS needs a moment to send its totals, so wait for a non-zero figure (a pack that really is at zero
+     is seeded after two minutes). */
+  if (soc_observer_count_energy && !energy_ready) {
+    if (energy_wait_start_ms == 0) {
+      energy_wait_start_ms = now;
+    }
+    BatteryEmulatorSettingsStore settings(true);
+    const uint32_t saved_chg = settings.getUInt("SOCOBSECHG", 0xFFFFFFFF);
+    const uint32_t saved_dis = settings.getUInt("SOCOBSEDIS", 0xFFFFFFFF);
+    if (saved_chg != 0xFFFFFFFF && saved_dis != 0xFFFFFFFF) {
+      energy_charged_Wh = (double)saved_chg;
+      energy_discharged_Wh = (double)saved_dis;
+      energy_ready = true;
+    } else if (st.total_charged_battery_Wh > 0 || st.total_discharged_battery_Wh > 0 ||
+               (uint32_t)(now - energy_wait_start_ms) > 120000u) {
+      energy_charged_Wh = (double)st.total_charged_battery_Wh;
+      energy_discharged_Wh = (double)st.total_discharged_battery_Wh;
+      energy_ready = true;
+      save_energy();
+      logging.printf("SOC observer: energy totals start from the BMS figures, %.0f Wh in / %.0f Wh out\n",
+                     energy_charged_Wh, energy_discharged_Wh);
+    }
+  }
+
   float dt_s = (float)(now - last_ms) / 1000.0f;
   last_ms = now;
   if (dt_s > MAX_STEP_S) {
@@ -210,8 +263,16 @@ void soc_observer_update() {
 
   const bool voltage_ok = st.voltage_dV > 10;
   if (fresh) {
+    const float dWh = power_W * dt_s / 3600.0f;
+    if (soc_observer_count_energy && energy_ready) {
+      if (dWh >= 0.0f) {
+        energy_charged_Wh += dWh;
+      } else {
+        energy_discharged_Wh -= dWh;
+      }
+      energy_unsaved_Wh += fabsf(dWh);
+    }
     if (voltage_ok) {
-      const float dWh = power_W * dt_s / 3600.0f;
       const float dAh = (power_W / ((float)st.voltage_dV / 10.0f)) * dt_s / 3600.0f;
       soc_pptt += dAh * 1000.0f / (float)soc_observer_stats.cap_mAh * 10000.0f;
       leg_Wh += dWh;
@@ -263,6 +324,10 @@ void soc_observer_update() {
       const bool clean = !leg_dirty && leg_s >= MIN_LEG_S;
       if (clean) {
         (at_full_anchor ? soc_observer_stats.clean_charge : soc_observer_stats.clean_discharge) = leg;
+        if (!at_full_anchor && Ah > 0.0f) {
+          vref_dV = (uint32_t)lroundf(Wh / Ah * 10.0f);
+          save_vref();
+        }
         logging.printf("SOC observer: clean %s leg, %.0f Wh and %.1f Ah between the anchors in %.0f min\n", name, Wh, Ah,
                        leg.minutes);
       } else {
@@ -343,6 +408,38 @@ void soc_observer_update() {
   const double volts = (dis.valid && dis.Ah > 0.0f) ? (double)dis.Wh / (double)dis.Ah : (double)st.voltage_dV / 10.0;
   st.remaining_capacity_Wh =
       (uint32_t)((double)soc_observer_stats.cap_mAh / 1000.0 * (double)soc_pptt / 10000.0 * volts);
+  /* State of health. The BMS's own reading (nominal full pack energy against beginning of life) goes to MQTT
+     as the BMS figure. The main SOH becomes the capacity in use, as energy at the mean discharge voltage,
+     against the beginning of life energy. That capacity is the span between the two anchors, so it reads lower
+     than the BMS figure whenever the anchors sit inside the pack's full window. */
+  const double bol_Wh = (double)datalayer_extended.tesla.battery_beginning_of_life * 1000.0;
+  double bms_full_Wh = (double)datalayer_extended.tesla.battery_nominal_full_pack_energy * 100.0;  // 0.1 kWh units
+  if (bms_full_Wh <= 0.0) {
+    bms_full_Wh = (double)datalayer_extended.tesla.battery_nominal_full_pack_energy_m0 * 20.0;  // 0.02 kWh units
+  }
+  soc_observer_bms_soh_valid = bol_Wh > 0.0 && bms_full_Wh > 0.0;
+  if (soc_observer_bms_soh_valid) {
+    const double ratio = bms_full_Wh / bol_Wh;
+    soc_observer_bms_soh_pptt = (uint16_t)lround(ratio > 1.0 ? 10000.0 : ratio * 10000.0);
+  }
+  double v_ref = (double)vref_dV / 10.0;
+  if (v_ref <= 0.0 && datalayer.battery.info.number_of_cells > 0) {
+    // No clean discharge leg yet: nominal cell voltage times the cell count
+    v_ref = (double)datalayer.battery.info.number_of_cells *
+            (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? 3.2 : 3.6);
+  }
+  if (bol_Wh > 0.0 && v_ref > 0.0) {
+    double own = (double)soc_observer_stats.cap_mAh / 1000.0 * v_ref / bol_Wh;
+    own = own > 1.0 ? 1.0 : own;
+    st.soh_pptt = (uint16_t)lround(own * 10000.0);
+    st.soh_available = true;
+  }
+
+  if (soc_observer_count_energy && energy_ready) {
+    st.total_charged_battery_Wh = (uint32_t)energy_charged_Wh;
+    st.total_discharged_battery_Wh = (uint32_t)energy_discharged_Wh;
+  }
+
   if (fresh && voltage_ok) {
     int32_t dA = (int32_t)lroundf(power_W * 100.0f / (float)st.voltage_dV);
     if (dA > INT16_MAX) {
@@ -361,5 +458,9 @@ void soc_observer_update() {
     save_soc(soc_pptt);
     last_saved_pptt = soc_pptt;
     last_save_ms = now;
+  }
+  const double energy_step = soc_observer_energy_save_Wh < 100u ? 100.0 : (double)soc_observer_energy_save_Wh;
+  if (soc_observer_count_energy && energy_ready && energy_unsaved_Wh >= energy_step) {
+    save_energy();
   }
 }

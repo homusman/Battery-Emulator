@@ -658,6 +658,12 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
   if (var == "SOCOBSAUTO") {
     return settings.getBool("SOCOBSAUTO") ? "checked" : "";
   }
+  if (var == "SOCOBSENERGY") {
+    return settings.getBool("SOCOBSENERGY") ? "checked" : "";
+  }
+  if (var == "SOCOBSESAVE") {
+    return String(clamp_u32(settings.getUInt("SOCOBSESAVE", 1000), 100, 50000));
+  }
   if (var == "SOCOBSMAXDELTA") {
     return String(clamp_u32(settings.getUInt("SOCOBSMAXDELTA", 10), 1, 50));
   }
@@ -1904,6 +1910,11 @@ String qnhck_zero_text(uint16_t zero_mV) {
       display: contents;
     }
 
+    form .if-socobsenergy { display: none; }
+    form[data-socobsenergy="true"] .if-socobsenergy {
+      display: contents;
+    }
+
     form .if-socobsauto { display: none; }
     form[data-socobsauto="true"] .if-socobsauto {
       display: contents;
@@ -2427,6 +2438,15 @@ String qnhck_zero_text(uint16_t zero_mV) {
         <label>Learning rate, percent (100 = take the measured value, 0 = never change): </label>
         <input type='number' name='SOCOBSLRATE' value="%SOCOBSLRATE%"
         min="0" max="100" step="1" />
+        </div>
+
+        <label>Count lifetime charged/discharged energy (replaces the BMS totals):</label>
+        <input type='checkbox' name='SOCOBSENERGY' value='on' %SOCOBSENERGY% />
+
+        <div class='if-socobsenergy'>
+        <label>Write the energy totals to flash every, Wh moved: </label>
+        <input type='number' name='SOCOBSESAVE' value="%SOCOBSESAVE%"
+        min="100" max="50000" step="1" />
         </div>
 
         <label>Full anchor: max cell at or above, mV: </label>

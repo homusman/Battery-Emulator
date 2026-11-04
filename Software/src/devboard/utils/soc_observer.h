@@ -21,11 +21,19 @@ extern uint16_t soc_observer_full_pptt;    // SOC set at the full anchor, 0.01% 
 extern uint16_t soc_observer_empty_pptt;   // SOC set at the empty anchor, 0.01% units
 extern uint16_t soc_observer_anchor_max_W;  // |power| must be at or below this for the full anchor to count
 extern uint16_t soc_observer_timeout_s;     // power input older than this is treated as missing
+extern bool soc_observer_count_energy;      // keep BE's own lifetime charged/discharged energy totals
+extern uint32_t soc_observer_energy_save_Wh;  // write the energy totals to flash after this much more energy has moved
 
 /** What the BMS itself reported as SOC this cycle (0.01% units), kept before the observer overwrites real_soc.
    Valid once the observer has run at least once. */
 extern uint16_t soc_observer_bms_pptt;
 extern bool soc_observer_bms_valid;
+
+/** State of health as the BMS itself implies it (nominal full pack energy / beginning of life energy, 0.01% units),
+    for MQTT. The observer replaces the main SOH with its own figure: the capacity in use compared with the BMS's
+    beginning of life energy. */
+extern uint16_t soc_observer_bms_soh_pptt;
+extern bool soc_observer_bms_soh_valid;
 
 /** One completed trip from one anchor to the other: what went through the pack terminals between the two
     anchor states (inverter losses excluded). */
