@@ -11,17 +11,18 @@
 
    Settings (loaded from NVM in comm_nvm.cpp) */
 extern bool soc_observer_enabled;
-extern uint32_t soc_observer_capacity_Ah;  // usable Ah between the anchors, 0 = estimate from the pack's own capacity
-extern bool soc_observer_auto_capacity;    // learn the capacity from clean anchor-to-anchor legs
+extern uint32_t
+    soc_observer_nominal_capacity_Ah;    // fixed nominal 0-100% capacity; 0 = estimate working Ah, SOH unknown
+extern bool soc_observer_auto_capacity;  // learn the capacity from clean anchor-to-anchor legs
 extern uint16_t soc_observer_learn_max_delta_pct;  // a leg only teaches if it is within this % of the capacity in use
 extern uint16_t soc_observer_learn_rate_pct;       // 100 = take the measured value, 0 = never change
-extern uint16_t soc_observer_full_mV;      // max cell at/above this (and idle) re-anchors SOC to the full value
-extern uint16_t soc_observer_empty_mV;     // min cell at/below this re-anchors SOC to the empty value
-extern uint16_t soc_observer_full_pptt;    // SOC set at the full anchor, 0.01% units (10000 = 100%)
-extern uint16_t soc_observer_empty_pptt;   // SOC set at the empty anchor, 0.01% units
-extern uint16_t soc_observer_anchor_max_W;  // |power| must be at or below this for the full anchor to count
-extern uint16_t soc_observer_timeout_s;     // power input older than this is treated as missing
-extern bool soc_observer_count_energy;      // keep BE's own lifetime charged/discharged energy totals
+extern uint16_t soc_observer_full_mV;              // max cell at/above this (and idle) re-anchors SOC to the full value
+extern uint16_t soc_observer_empty_mV;             // min cell at/below this re-anchors SOC to the empty value
+extern uint16_t soc_observer_full_pptt;            // SOC set at the full anchor, 0.01% units (10000 = 100%)
+extern uint16_t soc_observer_empty_pptt;           // SOC set at the empty anchor, 0.01% units
+extern uint16_t soc_observer_anchor_max_W;         // |power| must be at or below this for the full anchor to count
+extern uint16_t soc_observer_timeout_s;            // power input older than this is treated as missing
+extern bool soc_observer_count_energy;             // keep BE's own lifetime charged/discharged energy totals
 extern uint32_t soc_observer_energy_save_Wh;  // write the energy totals to flash after this much more energy has moved
 
 /** What the BMS itself reported as SOC this cycle (0.01% units), kept before the observer overwrites real_soc.
@@ -30,8 +31,7 @@ extern uint16_t soc_observer_bms_pptt;
 extern bool soc_observer_bms_valid;
 
 /** State of health as the BMS itself implies it (nominal full pack energy / beginning of life energy, 0.01% units),
-    for MQTT. The observer replaces the main SOH with its own figure: the capacity in use compared with the BMS's
-    beginning of life energy. */
+    for MQTT. The observer's main SOH is working Ah / configured nominal Ah. */
 extern uint16_t soc_observer_bms_soh_pptt;
 extern bool soc_observer_bms_soh_valid;
 
@@ -52,7 +52,8 @@ struct SocObserverStats {
   SocObserverLeg clean_discharge;  // full anchor -> empty anchor
   SocObserverLeg all_charge;
   SocObserverLeg all_discharge;
-  uint32_t cap_mAh = 0;  // capacity in use right now
+  uint32_t cap_mAh = 0;                  // working capacity in use; learning never changes nominal Ah
+  double calculated_remaining_Wh = 0.0;  // diagnostic only: working Ah * SOC * present voltage
 };
 extern SocObserverStats soc_observer_stats;
 

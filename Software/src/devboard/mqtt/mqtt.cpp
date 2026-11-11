@@ -239,6 +239,8 @@ static const SensorConfig batterySensorConfigTemplate[] = {
     // With the observer on, State of Health above is the observer's own figure. This is the BMS's.
     {"state_of_health_bms", "State of Health (BMS)", "%", "", soc_observer_shows_bms},
     {"observer_capacity_ah", "Observer capacity in use", "Ah", "", soc_observer_shows_bms},
+    {"observer_calculated_remaining_kwh", "Observer calculated remaining energy", "kWh", "energy_storage",
+     soc_observer_shows_bms},
     {"observer_charge_kwh", "Observer charge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
     {"observer_discharge_kwh", "Observer discharge leg, clean", "kWh", "energy_storage", soc_observer_shows_bms},
     {"observer_charge_ah", "Observer charge leg, clean (Ah)", "Ah", "", soc_observer_shows_bms},
@@ -403,7 +405,7 @@ enum ButtonCommand {
   BTN_SET_SOC,
   BTN_COUNT
 };
-static const char* button_commands[BTN_COUNT] = {"BMSRESET", "PAUSE",      "RESUME",     "RESTART",     "STOP",
+static const char* button_commands[BTN_COUNT] = {"BMSRESET",   "PAUSE",      "RESUME",       "RESTART",   "STOP",
                                                  "SET_LIMITS", "ESPNOW_RUN", "SET_SCALESOC", "SET_POWER", "SET_SOC"};
 static String button_command_topics[BTN_COUNT];
 
@@ -542,6 +544,7 @@ void set_battery_attributes(JsonDocument& doc, const DATALAYER_BATTERY_TYPE& bat
     const SocObserverStats& os = soc_observer_stats;
     if (os.cap_mAh > 0) {
       doc["observer_capacity_ah"] = ((float)os.cap_mAh) / 1000.0f;
+      doc["observer_calculated_remaining_kwh"] = os.calculated_remaining_Wh / 1000.0;
     }
     if (soc_observer_bms_soh_valid) {
       doc["state_of_health_bms"] = ((float)soc_observer_bms_soh_pptt) / 100.0f;

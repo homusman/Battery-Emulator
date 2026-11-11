@@ -1,8 +1,8 @@
 #include "comm_nvm.h"
-#include "../../devboard/utils/soc_observer.h"
 #include <esp_phy_init.h>  // esp_phy_erase_cal_data_in_nvs()
 #include "../../battery/BATTERIES.h"
 #include "../../battery/Battery.h"
+#include "../../devboard/utils/soc_observer.h"
 #ifndef SMALL_FLASH_DEVICE  // Chargers are left out of the small flash devices
 #include "../../charger/CanCharger.h"
 #endif  // SMALL_FLASH_DEVICE
@@ -220,7 +220,7 @@ void init_stored_settings() {
   charge_taper_v_start_mV = settings.getUInt("CHGTAPERVSTART", 3400);
   charge_taper_v_end_mV = settings.getUInt("CHGTAPERVEND", 3450);
   soc_observer_enabled = settings.getBool("SOCOBS", false);
-  soc_observer_capacity_Ah = settings.getUInt("SOCOBSCAPAH", 0);
+  soc_observer_nominal_capacity_Ah = settings.getUInt("SOCOBSCAPAH", 0);
   soc_observer_auto_capacity = settings.getBool("SOCOBSAUTO", false);
   soc_observer_learn_max_delta_pct = settings.getUInt("SOCOBSMAXDELTA", 10);
   soc_observer_learn_rate_pct = settings.getUInt("SOCOBSLRATE", 50);

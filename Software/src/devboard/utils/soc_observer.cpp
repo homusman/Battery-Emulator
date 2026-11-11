@@ -1,4 +1,5 @@
 #include "soc_observer.h"
+#include "soc_observer_metrics.h"
 
 #include <Arduino.h>
 #include <math.h>
@@ -8,7 +9,7 @@
 #include "logging.h"
 
 bool soc_observer_enabled = false;
-uint32_t soc_observer_capacity_Ah = 0;
+uint32_t soc_observer_nominal_capacity_Ah = 0;
 bool soc_observer_auto_capacity = false;
 uint16_t soc_observer_learn_max_delta_pct = 10;
 uint16_t soc_observer_learn_rate_pct = 50;
@@ -42,14 +43,11 @@ static volatile uint32_t rx_power_ms = 0;
 static volatile bool rx_power_valid = false;
 static volatile int32_t pending_soc_pptt = -1;
 
-/* Capacity learned from clean legs, in mAh, 0 = nothing learned. Kept in NVM together with the manual
-   capacity it grew from, so changing the manual capacity in settings starts the learning over. */
+/* Capacity learned from clean legs, in mAh, 0 = nothing learned. Kept in NVM together with the nominal
+   capacity it grew from, so changing the nominal capacity in settings starts the learning over. */
 static uint32_t learned_mAh = 0;
 /* Estimated once from the pack's own figures when no capacity has been set */
 static uint32_t estimated_mAh = 0;
-/* Mean voltage the pack delivered over the last clean discharge leg (0.1 V units, Wh / Ah), kept in NVM.
-   Turns the capacity in Ah into energy when it is compared with the BMS's beginning of life energy. */
-static uint32_t vref_dV = 0;
 
 /* Lifetime energy through the pack terminals, counted from the power input while the totals are enabled */
 static double energy_charged_Wh = 0.0;
@@ -83,11 +81,6 @@ static void save_learned() {
   settings.saveUInt("SOCOBSLMAH", learned_mAh);
 }
 
-static void save_vref() {
-  BatteryEmulatorSettingsStore settings;
-  settings.saveUInt("SOCOBSVREF", vref_dV);
-}
-
 static void save_energy() {
   BatteryEmulatorSettingsStore settings;
   settings.saveUInt("SOCOBSECHG", (uint32_t)energy_charged_Wh);
@@ -95,13 +88,13 @@ static void save_energy() {
   energy_unsaved_Wh = 0.0;
 }
 
-/* Capacity in use, in mAh. Order: learned (when learning is on), the manual setting, the estimate. */
+/* Working capacity in mAh: learned (when learning is on), configured nominal, then the estimate. */
 static uint32_t eff_cap_mAh() {
   if (soc_observer_auto_capacity && learned_mAh > 0) {
     return learned_mAh;
   }
-  if (soc_observer_capacity_Ah > 0) {
-    return soc_observer_capacity_Ah * 1000u;
+  if (soc_observer_nominal_capacity_Ah > 0) {
+    return soc_observer_nominal_capacity_Ah * 1000u;
   }
   return estimated_mAh;
 }
@@ -150,16 +143,15 @@ void soc_observer_update() {
 
   if (!learned_loaded) {
     BatteryEmulatorSettingsStore settings(true);
-    vref_dV = settings.getUInt("SOCOBSVREF", 0);
     const uint32_t base = settings.getUInt("SOCOBSLBASE", 0xFFFFFFFF);
-    const uint32_t manual_mAh = soc_observer_capacity_Ah * 1000u;
-    if (base == manual_mAh) {
+    const uint32_t nominal_mAh = soc_observer_nominal_capacity_Ah * 1000u;
+    if (base == nominal_mAh) {
       learned_mAh = settings.getUInt("SOCOBSLMAH", 0);
     } else {
-      // The manual capacity was changed since anything was learned: start again from the new figure
+      // A changed nominal reference starts learning from the new figure.
       learned_mAh = 0;
       BatteryEmulatorSettingsStore writer;
-      writer.saveUInt("SOCOBSLBASE", manual_mAh);
+      writer.saveUInt("SOCOBSLBASE", nominal_mAh);
       writer.saveUInt("SOCOBSLMAH", 0);
     }
     learned_loaded = true;
@@ -176,9 +168,10 @@ void soc_observer_update() {
   if (soc_observer_stats.cap_mAh == 0) {
     return;  // no capacity and nothing to estimate from yet, leave the BMS values in place
   }
-  if (soc_observer_capacity_Ah == 0 && learned_mAh == 0 && !estimate_logged) {
-    logging.printf("SOC observer: no capacity set, estimating %.1f Ah from the battery's own figure. Set it in settings.\n",
-                   estimated_mAh / 1000.0f);
+  if (soc_observer_nominal_capacity_Ah == 0 && learned_mAh == 0 && !estimate_logged) {
+    logging.printf(
+        "SOC observer: no capacity set, estimating %.1f Ah from the battery's own figure. Set it in settings.\n",
+        estimated_mAh / 1000.0f);
     estimate_logged = true;
   }
 
@@ -324,12 +317,8 @@ void soc_observer_update() {
       const bool clean = !leg_dirty && leg_s >= MIN_LEG_S;
       if (clean) {
         (at_full_anchor ? soc_observer_stats.clean_charge : soc_observer_stats.clean_discharge) = leg;
-        if (!at_full_anchor && Ah > 0.0f) {
-          vref_dV = (uint32_t)lroundf(Wh / Ah * 10.0f);
-          save_vref();
-        }
-        logging.printf("SOC observer: clean %s leg, %.0f Wh and %.1f Ah between the anchors in %.0f min\n", name, Wh, Ah,
-                       leg.minutes);
+        logging.printf("SOC observer: clean %s leg, %.0f Wh and %.1f Ah between the anchors in %.0f min\n", name, Wh,
+                       Ah, leg.minutes);
       } else {
         logging.printf("SOC observer: unclean %s leg (%s), %.0f Wh and %.1f Ah in %.0f min, not used for learning\n",
                        name, leg_dirty ? leg_why : "too short", Wh, Ah, leg.minutes);
@@ -350,8 +339,9 @@ void soc_observer_update() {
                          cur_mAh / 1000.0f, next_mAh / 1000.0f, measured_mAh / 1000.0f, dev_pct,
                          (unsigned)soc_observer_learn_rate_pct);
         } else {
-          logging.printf("SOC observer: leg measured %.1f Ah, %.1f%% from the %.1f Ah in use (limit %u%%), not applied\n",
-                         measured_mAh / 1000.0f, dev_pct, cur_mAh / 1000.0f, (unsigned)soc_observer_learn_max_delta_pct);
+          logging.printf(
+              "SOC observer: leg measured %.1f Ah, %.1f%% from the %.1f Ah in use (limit %u%%), not applied\n",
+              measured_mAh / 1000.0f, dev_pct, cur_mAh / 1000.0f, (unsigned)soc_observer_learn_max_delta_pct);
         }
       }
     }
@@ -401,17 +391,18 @@ void soc_observer_update() {
     at_empty = false;
   }
 
-  /* Hand the result to the rest of BE. Remaining energy is the remaining charge at the voltage the pack
-     really delivered on the last clean discharge, or at the present voltage until there is one. */
+  // The configured energy and nominal Ah stay fixed; only the observer's working Ah can learn.
   st.real_soc = (uint16_t)lroundf(soc_pptt);
-  const SocObserverLeg& dis = soc_observer_stats.clean_discharge;
-  const double volts = (dis.valid && dis.Ah > 0.0f) ? (double)dis.Wh / (double)dis.Ah : (double)st.voltage_dV / 10.0;
-  st.remaining_capacity_Wh =
-      (uint32_t)((double)soc_observer_stats.cap_mAh / 1000.0 * (double)soc_pptt / 10000.0 * volts);
-  /* State of health. The BMS's own reading (nominal full pack energy against beginning of life) goes to MQTT
-     as the BMS figure. The main SOH becomes the capacity in use, as energy at the mean discharge voltage,
-     against the beginning of life energy. That capacity is the span between the two anchors, so it reads lower
-     than the BMS figure whenever the anchors sit inside the pack's full window. */
+  const SocObserverMetrics metrics =
+      calculate_soc_observer_metrics(soc_observer_stats.cap_mAh, soc_observer_nominal_capacity_Ah,
+                                     datalayer.battery.info.total_capacity_Wh, st.real_soc, st.voltage_dV);
+  st.remaining_capacity_Wh = metrics.remaining_Wh;
+  st.soh_pptt = metrics.soh_pptt;
+  st.soh_available = metrics.soh_valid;
+  // Diagnostic energy at present voltage, with no separate energy-capacity learning or feedback.
+  soc_observer_stats.calculated_remaining_Wh = metrics.calculated_remaining_Wh;
+
+  // Keep the BMS's own energy-based health estimate as a separate MQTT diagnostic.
   const double bol_Wh = (double)datalayer_extended.tesla.battery_beginning_of_life * 1000.0;
   double bms_full_Wh = (double)datalayer_extended.tesla.battery_nominal_full_pack_energy * 100.0;  // 0.1 kWh units
   if (bms_full_Wh <= 0.0) {
@@ -422,19 +413,6 @@ void soc_observer_update() {
     const double ratio = bms_full_Wh / bol_Wh;
     soc_observer_bms_soh_pptt = (uint16_t)lround(ratio > 1.0 ? 10000.0 : ratio * 10000.0);
   }
-  double v_ref = (double)vref_dV / 10.0;
-  if (v_ref <= 0.0 && datalayer.battery.info.number_of_cells > 0) {
-    // No clean discharge leg yet: nominal cell voltage times the cell count
-    v_ref = (double)datalayer.battery.info.number_of_cells *
-            (datalayer.battery.info.chemistry == battery_chemistry_enum::LFP ? 3.2 : 3.6);
-  }
-  if (bol_Wh > 0.0 && v_ref > 0.0) {
-    double own = (double)soc_observer_stats.cap_mAh / 1000.0 * v_ref / bol_Wh;
-    own = own > 1.0 ? 1.0 : own;
-    st.soh_pptt = (uint16_t)lround(own * 10000.0);
-    st.soh_available = true;
-  }
-
   if (soc_observer_count_energy && energy_ready) {
     st.total_charged_battery_Wh = (uint32_t)energy_charged_Wh;
     st.total_discharged_battery_Wh = (uint32_t)energy_discharged_Wh;

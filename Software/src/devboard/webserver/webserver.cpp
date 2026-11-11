@@ -8,6 +8,7 @@
 #include "../../battery/BATTERIES.h"
 #include "../../battery/BYD-ATTO-3-BALANCE-HTML.h"
 #include "../../battery/Battery.h"
+#include "../utils/soc_observer.h"
 #ifndef SMALL_FLASH_DEVICE  // Chargers are left out of the small flash devices
 #include "../../charger/CHARGERS.h"
 #endif  // SMALL_FLASH_DEVICE
@@ -533,7 +534,7 @@ void init_webserver() {
       "PYLONOFFSET",  "PYLONORDER",    "DEYEBYD",    "NCCONTACTOR",  "TRIBTR",        "CNTCTRLTRI",     "ESPNOWENABLED",
       "PRIMOGEN24",   "LOWPASSFILTER", "WEBAUTH",    "SLOWCANINV",   "CHGTAPERSOC",   "MEASURECPUTEMP", "SYSLOGEN",
       "PERBMSDEFSOC", "PERBMSSKIPBAL", "INVOFFGRID", "CHGESTIMATED", "MQTTHEAP",      "HADISCFWU",      "INVACCREB",
-      "LEAFAUTOOFS",  "CHGTAPERV",     "SOCOBS",  "SOCOBSAUTO", "SOCOBSENERGY",
+      "LEAFAUTOOFS",  "CHGTAPERV",     "SOCOBS",     "SOCOBSAUTO",   "SOCOBSENERGY",
 #ifndef SMALL_FLASH_DEVICE
       "CTINVERT",
 #endif  // SMALL_FLASH_DEVICE
@@ -543,17 +544,18 @@ void init_webserver() {
   };
 
   const char* uintSettingNames[] = {
-      "BATTCVMAX",     "BATTCVMIN",     "MAXPRETIME", "MAXPREFREQ", "WIFICHANNEL",  "DCHGPOWER",     "CHGPOWER",
-      "MQTTPORT",      "SOFAR_ID",      "PYLONSEND",  "INVCELLS",   "INVMODULES",   "INVCELLSPER",   "INVVLEVEL",
-      "INVCAPACITY",   "INVBTYPE",      "PRECHGMS",   "PWMFREQ",    "PWMHOLD",      "GTWCOUNTRY",    "GTWMAPREG",
-      "GTWCHASSIS",    "GTWPACK",       "LEDMODE",    "GPIOOPT1",   "GPIOOPT2",     "GPIOOPT3",      "INVSUNTYPE",
-      "GPIOOPT4",      "PYLONBAUD",     "PYLONBRAND", "DALYPWRPCT", "DALYPWRDV",    "DALYDVSTART",   "DALYPWRDEG",
-      "DALYPWR0C",     "GPIOOPT5",      "GPIOOPT6",   "INVICNT",    "FOXESSTYPE",   "FOXESSSUBTYPE", "FOXESSMODULES",
-      "CHGTAPERSTART", "CHGTAPERFLOOR", "SYSLOGPORT", "SYSLOGFAC",  "PERBMSRESETH",
-      "CHGTAPERVSTART", "CHGTAPERVEND", "SOCOBSFULLMV", "SOCOBSEMPTYMV", "SOCOBSFULLPCT",
-      "SOCOBSEMPTYPCT", "SOCOBSMAXW",   "SOCOBSTMO",   "SOCOBSCAPAH", "SOCOBSMAXDELTA", "SOCOBSLRATE", "SOCOBSESAVE",
+      "BATTCVMAX",     "BATTCVMIN",     "MAXPRETIME",     "MAXPREFREQ",    "WIFICHANNEL",    "DCHGPOWER",
+      "CHGPOWER",      "MQTTPORT",      "SOFAR_ID",       "PYLONSEND",     "INVCELLS",       "INVMODULES",
+      "INVCELLSPER",   "INVVLEVEL",     "INVCAPACITY",    "INVBTYPE",      "PRECHGMS",       "PWMFREQ",
+      "PWMHOLD",       "GTWCOUNTRY",    "GTWMAPREG",      "GTWCHASSIS",    "GTWPACK",        "LEDMODE",
+      "GPIOOPT1",      "GPIOOPT2",      "GPIOOPT3",       "INVSUNTYPE",    "GPIOOPT4",       "PYLONBAUD",
+      "PYLONBRAND",    "DALYPWRPCT",    "DALYPWRDV",      "DALYDVSTART",   "DALYPWRDEG",     "DALYPWR0C",
+      "GPIOOPT5",      "GPIOOPT6",      "INVICNT",        "FOXESSTYPE",    "FOXESSSUBTYPE",  "FOXESSMODULES",
+      "CHGTAPERSTART", "CHGTAPERFLOOR", "SYSLOGPORT",     "SYSLOGFAC",     "PERBMSRESETH",   "CHGTAPERVSTART",
+      "CHGTAPERVEND",  "SOCOBSFULLMV",  "SOCOBSEMPTYMV",  "SOCOBSFULLPCT", "SOCOBSEMPTYPCT", "SOCOBSMAXW",
+      "SOCOBSTMO",     "SOCOBSCAPAH",   "SOCOBSMAXDELTA", "SOCOBSLRATE",   "SOCOBSESAVE",
 #ifndef SMALL_FLASH_DEVICE
-      "CTVNOM",        "CTANOM",        "QNHIPN",     "QNHVO",
+      "CTVNOM",        "CTANOM",        "QNHIPN",         "QNHVO",
 #endif  // SMALL_FLASH_DEVICE
   };
 
@@ -1451,6 +1453,13 @@ static void render_battery_card(String& content, const String& style, const Batt
   } else {
     content += formatPowerValue("Total capacity", v.total_capacity_Wh, "h", 1);
     content += formatPowerValue("Remaining capacity", v.remaining_capacity_Wh, "h", 1);
+  }
+
+  if (pack_index == 1 && soc_observer_enabled && soc_observer_stats.cap_mAh > 0) {
+    content += "<h4 style='color: white;'>Observer capacity in use: " + String(soc_observer_stats.cap_mAh / 1000.0, 1) +
+               " Ah</h4>";
+    content += "<h4 style='color: white;'>Calculated remaining energy (present voltage): " +
+               String(soc_observer_stats.calculated_remaining_Wh / 1000.0, 2) + " kWh</h4>";
   }
 
   if (system_card) {

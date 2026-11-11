@@ -1,6 +1,8 @@
 {
   "wiki": "https://dalathegreat.github.io/Battery-Emulator-Wiki/",
   "help": {
+    "SOCOBSCAPAH": "Fixed nominal full-pack capacity in Ah for the 0-100% anchor window. Working Ah starts here and can learn separately; SOH is working Ah divided by this reference, capped at 100%. Zero estimates working Ah but leaves observer SOH unknown. Existing saved Ah is preserved; verify it is the original nominal rating.",
+    "SOCOBSAUTO": "Learn working capacity in Ah from clean anchor-to-anchor legs. Never modifies nominal Ah or configured pack energy. Calculated energy is a diagnostic only, with no separate energy-capacity learning.",
     "SSID": "Max 32 characters, printable ASCII only.",
     "PASSWORD": "Password must be 8-63 characters long, printable ASCII only.",
     "HOSTNAME": "Letters, numbers, '_' and '-' only. Optional. If MQTT is enabled, the topic name, object ID prefix, Home Assistant device name and ID are also set to this. See [MQTT](setup/software/mqtt/).",

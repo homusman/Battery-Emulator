@@ -2423,11 +2423,11 @@ String qnhck_zero_text(uint16_t zero_mV) {
         <input type='checkbox' name='SOCOBS' value='on' %SOCOBS% />
 
         <div class='if-socobs'>
-        <label>Observer usable capacity between the anchors, Ah (0 = estimate): </label>
+        <label>Nominal full-pack capacity, Ah (fixed SOH reference; 0 = estimate, SOH unknown): </label>
         <input type='number' name='SOCOBSCAPAH' value="%SOCOBSCAPAH%"
         min="0" max="2000" step="1" />
 
-        <label>Learn capacity from clean anchor-to-anchor legs:</label>
+        <label>Learn working Ah capacity from clean anchor-to-anchor legs (nominal stays fixed):</label>
         <input type='checkbox' name='SOCOBSAUTO' value='on' %SOCOBSAUTO% />
 
         <div class='if-socobsauto'>
